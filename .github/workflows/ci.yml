@@ -1,0 +1,127 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        # 1.23.x is the floor go.mod promises, and a promise nothing checks is a guess.
+        go: ['1.23.x', 'oldstable', 'stable']
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ matrix.go }}
+      - run: go build ./...
+      - run: go vet ./...
+      # -race because this harness exists to fan trials across goroutines and merge their verdicts.
+      - run: go test -race -count=1 ./...
+
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "not gofmt'd:"
+            echo "$unformatted"
+            exit 1
+          fi
+      - name: build for windows
+        # mutest does not run on Windows and says so, but it must say so in one sentence at startup
+        # rather than in a wall of compiler errors, and only a cross-compile keeps that true.
+        run: GOOS=windows go build ./...
+      - name: lint
+        run: |
+          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.5.0
+          golangci-lint run ./...
+      - name: nothing outside the standard library
+        # The README states this as an invariant, and an invariant nothing checks is a hope. A
+        # harness that pulled in a dependency would measure modules that also depend on it, and a
+        # sweep is the wrong moment to discover that the two versions disagree. "go list -m all"
+        # names this module and every module it requires, so the whole check is that there is one.
+        run: |
+          modules=$(go list -m all)
+          if [ "$modules" != "github.com/gurre/mutest" ]; then
+            echo "mutest must depend on nothing outside the standard library, but requires:"
+            echo "$modules"
+            exit 1
+          fi
+
+  release-config:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+      # A cross-compile that breaks should fail a pull request, not a tag push — by then the tag is
+      # permanent and the release half made.
+      - uses: goreleaser/goreleaser-action@v7
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: build --snapshot --clean
+
+  selfsweep:
+    strategy:
+      fail-fast: false
+      matrix:
+        # The floor as well as the newest, because the two toolchains do not report a build failure
+        # the same way: FailedBuild arrived in 1.24, and on 1.23 the verdict is only in the go
+        # command's own summary line. A sweep that reads one and not the other scores every mutant
+        # that did not compile as one the tests caught, which is the score moving in the direction
+        # that flatters the suite. Only a real sweep on a real toolchain shows that.
+        go: ['1.23.x', 'stable']
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ matrix.go }}
+      # One package, end to end: does the tool still copy a module, probe it, mutate it and report
+      # on a machine that is not the author's. A hosted runner has no vendor directory, which is
+      # also what keeps mutest honest about modules that do not vendor.
+      #
+      # The disk and cache bounds are not tuning. The defaults assume a developer's laptop and a
+      # runner has far less free space than that, so without them the sweep refuses to start.
+      - run: go run . -results mutants.json -packages mutant -jobs 2 -disk-floor 1GiB -cache-budget 2GiB
+      - name: a mutant that does not compile is invalid, not caught
+        # The one verdict the two toolchains disagree about, and the reason this job runs on the
+        # floor at all. A build failure carries a structured field from 1.24 onward and only the go
+        # command's own summary line before that; a harness reading one and not the other scores
+        # every mutant that did not compile as one the tests caught. That looks like a better score,
+        # which is the direction nobody investigates. Some of this package's mutants do not compile,
+        # so a run that finds none of them has stopped recognising them.
+        run: |
+          invalid=$(grep -c '"outcome": "invalid"' mutants.json || true)
+          echo "invalid mutants: $invalid"
+          if [ "$invalid" -eq 0 ]; then
+            echo "no mutant was recorded as invalid, so build failures are being scored as kills"
+            exit 1
+          fi

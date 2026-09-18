@@ -1,0 +1,56 @@
+version: 2
+
+project_name: mutest
+
+before:
+  hooks:
+    # Checked rather than tidied. "go mod tidy" here would quietly write a dependency in and build
+    # against it, which is the one invariant this project has that a released binary could break
+    # with nobody reading a diff. This refuses instead, and names what appeared.
+    - sh -c 'test "$(go list -m all)" = "github.com/gurre/mutest" || { go list -m all; echo "mutest must depend on nothing outside the standard library"; exit 1; }'
+
+builds:
+  - id: mutest
+    main: .
+    binary: mutest
+    env:
+      # mutest reaches for syscall but never for cgo, so the binaries come out static and run on
+      # any base image rather than only the one they were linked against.
+      - CGO_ENABLED=0
+    # Unix only, and enforced here rather than only claimed in the README: the sweep uses flock to
+    # reclaim scratch directories abandoned by sweeps that were killed, and statfs to refuse to
+    # start on a full disk. Neither has a Windows equivalent that is worth shipping untested.
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      # So a released binary's stack traces name the package rather than the directory it happened
+      # to be built in.
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.ShortCommit}}
+      - -X main.date={{.CommitDate}}
+
+archives:
+  - id: mutest
+    formats: [tar.gz]
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  use: github
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"

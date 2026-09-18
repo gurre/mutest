@@ -1,0 +1,7 @@
+# Anchored, so none of these can shadow a package directory of the same name.
+/mutest
+/mutants.json
+/mutants.jsonl
+/dist
+*.out
+.DS_Store

@@ -1,0 +1,34 @@
+name: selfsweep
+
+# The whole module, weekly rather than per pull request. A full sweep is thousands of trials and
+# every one is a compile, so it belongs somewhere it can take as long as it takes without standing
+# between a contributor and a review.
+on:
+  schedule:
+    - cron: '0 4 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+      # A ceiling rather than a target, and a ratchet rather than a standard. Measured at 1163 on
+      # 2026-09-18 — 750 survivors and 413 sites no test runs — so this catches the module getting
+      # meaningfully worse without failing every week over a handful of mutants that land
+      # differently on a runner than on a laptop. Lower it as findings are dealt with; a job that
+      # cannot fail is not a check, and one that fails every week stops being read.
+      - run: go run . -results mutants.json -disk-floor 1GiB -cache-budget 4GiB -fail-on 1250
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mutants
+          path: mutants.json*
+          if-no-files-found: warn

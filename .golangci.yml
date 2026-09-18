@@ -1,0 +1,34 @@
+version: "2"
+
+run:
+  tests: true
+  concurrency: 4
+
+linters:
+  default: none
+  enable:
+    - gocritic # Detects suspicious constructs
+    - gosec # Security linter
+    - govet # Reports suspicious constructs
+    - ineffassign # Detects ineffectual assignments
+    - misspell # Finds commonly misspelled words
+    - staticcheck # Applies various static analysis checks, and in v2 also gosimple and stylecheck
+    - unused # Checks for unused code
+    - whitespace # Checks for unnecessary whitespace
+  exclusions:
+    rules:
+      # A test writes its fixtures into a directory it made itself and reads them back, which is
+      # every one of these findings. Annotating each site would be more noise than the rule buys.
+      - path: _test\.go
+        linters:
+          - gosec
+
+formatters:
+  settings:
+    goimports:
+      # put imports beginning with prefix after 3rd-party packages
+      local-prefixes:
+        - github.com/gurre/mutest
+
+issues:
+  max-same-issues: 1
