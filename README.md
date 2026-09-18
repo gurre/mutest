@@ -11,18 +11,31 @@ wrong. mutest makes the code wrong — one small deliberate defect at a time —
 against each one. A defect every test still passes is the finding: the code could behave that way
 in production and nothing in your repository would say so.
 
+## Install
+
 ```
 go install github.com/gurre/mutest@latest
+```
+
+That puts a `mutest` binary in `$(go env GOBIN)`, or `$(go env GOPATH)/bin` if `GOBIN` is unset.
+Put that directory on your `PATH` and run
+mutest from the root of the module you want to measure — it is a command you install once, not a
+dependency of the module under test, and it never appears in its `go.mod`.
+
+```
+cd /path/to/your/module
 
 mutest                                  # every package in the module
-mutest -packages mutation               # one package
+mutest -packages internal/billing       # one package
 mutest -results mutants.json            # keep the full result set
 mutest -h                               # flags, outcomes and operators
 mutest -why                             # the reasoning behind the defaults
 ```
 
 Prebuilt binaries for Linux and macOS, amd64 and arm64, are on the
-[releases page](https://github.com/gurre/mutest/releases).
+[releases page](https://github.com/gurre/mutest/releases); put one on your `PATH` and it behaves
+the same. A Go toolchain is needed either way, because a sweep compiles and runs the tests of the
+module it measures.
 
 ## What a report looks like
 
@@ -135,12 +148,16 @@ floor is what still stops them. Give a sweep its own `-cache` if you routinely r
 
 ## Using it in CI
 
-`-fail-on` sets a ceiling on survivors and unreached sites together, and the exit status is zero
-unless that ceiling is exceeded or the sweep could not run:
+Install it the same way there — a step of its own, so the version CI measures with is the version
+you named — and run the binary from the checkout of the module under test:
 
 ```
-mutest -packages scorecard -fail-on 0
+go install github.com/gurre/mutest@latest
+mutest -packages internal/billing -fail-on 0
 ```
+
+`-fail-on` sets a ceiling on survivors and unreached sites together, and the exit status is zero
+unless that ceiling is exceeded or the sweep could not run.
 
 Counting survivors alone would mean that deleting a test raises the score, which is the one way
 this measurement can be gamed.
@@ -160,8 +177,10 @@ One invariant, checked in CI: nothing outside the standard library gets imported
 carried a dependency would measure modules that carry it too, and a sweep is the wrong moment to
 find out the two versions disagree.
 
-Before sending a change, run `go test -race -count=1 ./...`, `golangci-lint run`, and mutest over
-the package you touched.
+Before sending a change, run `go test -race -count=1 ./...`, `golangci-lint run`, and a sweep over
+the package you touched. This repository is the one place to run it as `go run . -packages <the
+package you touched>` rather than as an installed binary: what you want measured is the working
+copy, and an installed `mutest` would be measuring it with whatever was on your `PATH` last week.
 
 ## License
 

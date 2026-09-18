@@ -5,9 +5,13 @@
 // one. A defect every test still passes is the finding: the code could behave that way in
 // production and nothing in this repository would say so.
 //
-//	mutest -packages mutation
+// It is installed with "go install github.com/gurre/mutest@latest" and run from the root of the
+// module being measured, which is never this one: mutest is a command on the PATH rather than a
+// dependency, and nothing it measures imports it.
+//
+//	mutest -packages internal/billing
 //	mutest -jobs 8 -results mutants.json
-//	mutest -packages trial -list
+//	mutest -packages internal/billing -list
 //
 // Each package's tests are run once unchanged before anything is mutated. That one run is what
 // lets the report separate a defect the tests run past without objecting from one they never
@@ -247,9 +251,14 @@ mutates the copy, runs one package's tests and restores the file. Interrupting a
 and reports the trials that had finished.
 
 
-Usage, from the module root:
+Usage:
 
+  go install github.com/gurre/mutest@latest   # once, onto your PATH
+  cd /path/to/your/module                     # the module to measure
   mutest [flags]
+
+mutest is a command you install, not a dependency of the module under test: it never appears in
+its go.mod, and it measures whatever module it is run from. -module points it at another one.
 
 Flags:
 
@@ -428,13 +437,13 @@ value and drops the rendezvous, running a goroutine inline keeps the work and dr
 taking a default off a select keeps the cases and drops the not-waiting. A suite that notices none of
 those is a suite that would not notice the ordering going wrong.
 
-Examples:
+Examples, run from the root of the module being measured:
 
   # One package, a few minutes. The usual way to check tests just written.
-  mutest -packages mutation
+  mutest -packages internal/billing
 
   # What would be tried, without running anything.
-  mutest -packages trial -list
+  mutest -packages internal/billing -list
 
   # Every package. Minutes on a small module, an hour or more on a large one, and what
   # remains is a compile per defect rather than anything this tool can hurry. mutants.jsonl
@@ -443,14 +452,14 @@ Examples:
   # rather than from the first half of the alphabet.
   mutest -results mutants.json
 
-  # Would the scorecard's tests notice a defect in the package it reads its results from?
-  mutest -packages mutant -against scorecard
+  # Would the API's tests notice a defect in the store package it reads through?
+  mutest -packages internal/store -against internal/api
 
   # In CI, on a package whose findings have all been dealt with.
-  mutest -packages mutation -fail-on 0
+  mutest -packages internal/billing -fail-on 0
 
   # One defect per invocation. Slower, and what a disagreement is diagnosed against.
-  mutest -packages mutation -batch 1
+  mutest -packages internal/billing -batch 1
 
 Each survivor is a sentence of the form "the code could do this instead and nothing would say
 so". Some of them no test can kill: an AWS timeout constant, an error branch that cannot be
@@ -858,7 +867,7 @@ func targetPackages(module, requested string) ([]string, error) {
 		// the tree with ".." is read and mutated outside the module the caller pointed at, and a
 		// sweep killed between writing the defect and restoring the file leaves it there.
 		if !filepath.IsLocal(cleaned) {
-			return nil, fmt.Errorf("%q is not inside the module: name a package by its directory relative to the module root, as in -packages mutation", trimmed)
+			return nil, fmt.Errorf("%q is not inside the module: name a package by its directory relative to the module root, as in -packages internal/billing", trimmed)
 		}
 
 		targets = append(targets, cleaned)

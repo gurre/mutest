@@ -20,6 +20,10 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version: stable
+      # "go run ." rather than the installed binary the README tells users to run: what this job
+      # measures is the commit that triggered it, and an installed mutest would measure it with
+      # whichever version the module proxy last served.
+      #
       # A ceiling rather than a target, and a ratchet rather than a standard. Measured at 1163 on
       # 2026-09-18 — 750 survivors and 413 sites no test runs — so this catches the module getting
       # meaningfully worse without failing every week over a handful of mutants that land
