@@ -30,6 +30,11 @@ builds:
       # So a released binary's stack traces name the package rather than the directory it happened
       # to be built in.
       - -trimpath
+    # The tag's own commit time rather than the moment the runner happened to build, so rebuilding
+    # a tag produces the same bytes. Without it every artifact carries the build clock, two builds
+    # of one tag differ, and nobody can check that a published binary came from the source it
+    # claims to have come from.
+    mod_timestamp: "{{ .CommitTimestamp }}"
     ldflags:
       - -s -w
       - -X main.version={{.Version}}
