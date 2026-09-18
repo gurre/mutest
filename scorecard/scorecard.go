@@ -94,7 +94,7 @@ type PackageGap struct {
 	Detail string `json:"detail,omitempty"`
 }
 
-// FunctionGap is a function no test enters, and how many defects sit inside it.
+// FunctionGap is a function with sites no test reaches, and how many of them there are.
 //
 // Rolling the sites up is what makes the list readable: one line saying nothing tests a function
 // is worked through in one action, and forty lines naming forty of its lines are not.
@@ -106,6 +106,20 @@ type FunctionGap struct {
 	Line int `json:"line"`
 	// Sites is how many defects there are in it that no test would notice.
 	Sites int `json:"sites"`
+	// Reached is how many of its sites a test does run. Zero means no test enters the function at
+	// all; anything else means a test enters it and stops short, which is a different piece of work
+	// — a case nobody added rather than a test nobody wrote — and reporting the two under one
+	// heading told somebody to write a test that was already there.
+	Reached int `json:"reached"`
+}
+
+// Entered reports whether any test runs any part of the function.
+//
+// Example:
+//
+//	if !gap.Entered() { ... }
+func (g FunctionGap) Entered() bool {
+	return g.Reached > 0
 }
 
 // IdleTest is a test that killed no mutant anywhere in its package.
@@ -221,6 +235,9 @@ func Tabulate(results []mutant.Result, suites []Suite) Scorecard {
 	errored := map[string]int{}
 
 	gaps := map[string]*FunctionGap{}
+	// reached counts, per function, the sites a test does run, so a function the tests enter and
+	// stop short in is not reported as one nobody has written a test for.
+	reached := map[string]int{}
 	// killers holds every test that failed for some mutant, so the ones that never did can be
 	// named. A subtest is rolled up to the test that declares it: the inventory holds top-level
 	// names, and a suite whose subtest did the catching is doing its job.
@@ -268,6 +285,17 @@ func Tabulate(results []mutant.Result, suites []Suite) Scorecard {
 			killers[result.Mutant.Site.Package+"\x00"+topLevelTest(name)] = true
 		}
 
+		// Every outcome but these says a test runs the site: reach is decided from the coverage
+		// profile before a trial happens, so a mutant that failed to compile, or whose trial went
+		// wrong, was still at a position the tests enter. Counting only the scored ones would put a
+		// function whose every mutant was invalid into the list of functions no test runs — which is
+		// the confusion this split exists to end, reintroduced one level down.
+		switch result.Outcome {
+		case mutant.Unreached, mutant.Unmeasured, mutant.Untested:
+		default:
+			reached[functionKey(result.Mutant.Site)]++
+		}
+
 		if !result.Outcome.Scored() {
 			continue
 		}
@@ -312,6 +340,7 @@ func Tabulate(results []mutant.Result, suites []Suite) Scorecard {
 		}
 	}
 
+	withReach(gaps, reached)
 	card.UnreachedFunctions = orderedGaps(gaps)
 	card.ErroredReasons = orderedReasons(errored)
 
@@ -380,9 +409,7 @@ func topLevelTest(name string) string {
 
 // recordGap folds one unreached site into its function's entry.
 func recordGap(gaps map[string]*FunctionGap, site mutant.Site) {
-	// A site outside any function is keyed on its file, so a package's declarations do not all
-	// collapse into one nameless heading.
-	key := site.File + "\x00" + site.Func
+	key := functionKey(site)
 
 	gap, found := gaps[key]
 	if !found {
@@ -400,6 +427,26 @@ func recordGap(gaps map[string]*FunctionGap, site mutant.Site) {
 	gap.Sites++
 	if site.Line < gap.Line {
 		gap.Line = site.Line
+	}
+}
+
+// functionKey is the name a function's sites are gathered under. A site outside any function is
+// keyed on its file, so a package's declarations do not all collapse into one nameless heading.
+func functionKey(site mutant.Site) string {
+	return site.File + "\x00" + site.Func
+}
+
+// withReach records, against each function that has an unreached site, how many of its sites a
+// test does run — so a function the tests enter and stop short in can be told from one they never
+// enter at all.
+//
+// Counted in a map of its own rather than onto the entries directly, because results arrive in the
+// order the trials settled and a function's reached sites routinely land before its unreached ones.
+// Folding them in as they came would have dropped every count recorded before the entry existed,
+// and a function would then have read as untouched on one sweep and partly reached on the next.
+func withReach(gaps map[string]*FunctionGap, reached map[string]int) {
+	for key, gap := range gaps {
+		gap.Reached = reached[key]
 	}
 }
 
@@ -510,12 +557,11 @@ func (s Scorecard) WriteTo(out io.Writer) (int64, error) {
 	writeGaps(counter, "packages with no test files — these need a test, not a better assertion", s.UntestedPackages)
 	writeGaps(counter, "packages that ran no test they did not skip", s.SkipOnlyPackages)
 
-	if len(s.UnreachedFunctions) > 0 {
-		fmt.Fprintf(counter, "\ncode no test runs (%d functions) — each line is a test nobody has written:\n", len(s.UnreachedFunctions))
-		for _, gap := range s.UnreachedFunctions {
-			fmt.Fprintf(counter, "  %4d %s  %s:%d  %s\n", gap.Sites, plural(gap.Sites, "site"), gap.File, gap.Line, named(gap.Func))
-		}
-	}
+	writeUnreached(counter, "code no test runs", "each line is a test nobody has written",
+		s.UnreachedFunctions, false)
+	writeUnreached(counter, "code a test enters but does not finish",
+		"each line is a case nobody added to a test that already exists",
+		s.UnreachedFunctions, true)
 
 	if len(s.UnobservedGuards) > 0 {
 		fmt.Fprintf(counter, "\nguards no test decides either way (%d %s, %d of the %d survivors):\n",
@@ -539,6 +585,10 @@ func (s Scorecard) WriteTo(out io.Writer) (int64, error) {
 
 	if len(s.IdleTests) > 0 {
 		fmt.Fprintf(counter, "\ntests that caught nothing (%d) — no defect anywhere made one of these fail:\n", len(s.IdleTests))
+		fmt.Fprintf(counter, "  read before acting. A test can be here because it carries no weight, and that is the\n")
+		fmt.Fprintf(counter, "  common case — but also because what it guards is something no operator mutates: a flag\n")
+		fmt.Fprintf(counter, "  name, a fixture, a help string, the shape of a list. Those catch edits rather than\n")
+		fmt.Fprintf(counter, "  defects, and deleting one loses a check nothing else here can make.\n")
 		for _, idle := range s.IdleTests {
 			fmt.Fprintf(counter, "  %s  %s\n", idle.Package, idle.Test)
 		}
@@ -564,6 +614,30 @@ func plural(count int, noun string) string {
 	}
 
 	return noun + "s"
+}
+
+// writeUnreached prints one of the two halves of the unreached list: the functions no test enters,
+// or the functions a test enters and stops short in.
+//
+// They were one list under one heading, which said every line was a test nobody had written. That
+// was true of the first kind and wrong about the second, where a test exists, runs, and returns
+// before it gets there — and somebody sent to write a test that is already in the file learns to
+// distrust the rest of the report.
+func writeUnreached(out io.Writer, heading, remedy string, gaps []FunctionGap, entered bool) {
+	matching := make([]FunctionGap, 0, len(gaps))
+	for _, gap := range gaps {
+		if gap.Entered() == entered {
+			matching = append(matching, gap)
+		}
+	}
+	if len(matching) == 0 {
+		return
+	}
+
+	fmt.Fprintf(out, "\n%s (%d %s) — %s:\n", heading, len(matching), plural(len(matching), "function"), remedy)
+	for _, gap := range matching {
+		fmt.Fprintf(out, "  %4d %s  %s:%d  %s\n", gap.Sites, plural(gap.Sites, "site"), gap.File, gap.Line, named(gap.Func))
+	}
 }
 
 func writeGaps(out io.Writer, heading string, gaps []PackageGap) {

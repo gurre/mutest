@@ -24,12 +24,17 @@ jobs:
       # measures is the commit that triggered it, and an installed mutest would measure it with
       # whichever version the module proxy last served.
       #
-      # A ceiling rather than a target, and a ratchet rather than a standard. Measured at 1163 on
-      # 2026-09-18 — 750 survivors and 413 sites no test runs — so this catches the module getting
+      # A ceiling rather than a target, and a ratchet rather than a standard. Measured at 1030 on
+      # 2026-09-18 — 734 survivors and 296 sites no test runs — so this catches the module getting
       # meaningfully worse without failing every week over a handful of mutants that land
       # differently on a runner than on a laptop. Lower it as findings are dealt with; a job that
       # cannot fail is not a check, and one that fails every week stops being read.
-      - run: go run . -results mutants.json -disk-floor 1GiB -cache-budget 4GiB -fail-on 1250
+      #
+      # The previous figure of 1163 was measured over six of the nine packages: trial's baseline
+      # was being reported as a failing suite, which settles every mutant there as unmeasured and
+      # counts none of them here. It is measured now, so this number covers the whole module and is
+      # not comparable with the one it replaces.
+      - run: go run . -results mutants.json -disk-floor 1GiB -cache-budget 4GiB -fail-on 1100
       - uses: actions/upload-artifact@v4
         if: always()
         with:

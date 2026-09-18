@@ -548,8 +548,32 @@ func TestASweepWithNoUnobservedGuardsSaysNothingAboutThem(t *testing.T) {
 
 	// An empty section is noise on every report that has nothing to triage, and the other
 	// conditional sections here are all written the same way.
-	if strings.Contains(rendered(t, card), "guards no test can tell either way") {
+	//
+	// The fragment is short on purpose. This read "guards no test can tell either way" — wording
+	// the report has never used — so it agreed that the section was absent from every report,
+	// including one that printed it on every line. A test that names the exact sentence it is
+	// checking for goes quietly vacuous the first time somebody rewords the sentence.
+	if strings.Contains(rendered(t, card), "guards no test") {
 		t.Error("a sweep with no unobserved guards must not print the section")
+	}
+}
+
+func TestASweepWithUnobservedGuardsPrintsTheSection(t *testing.T) {
+	both := func(operator string) mutant.Result {
+		found := result("a", operator, mutant.Survived)
+		found.Mutant.Site.Line = 12
+		found.Mutant.Original = "c.floor > 0"
+
+		return found
+	}
+
+	card := Tabulate([]mutant.Result{both("guard-always"), both("guard-never")}, nil)
+
+	// The other half of the check above, and the half whose absence is silent: a section that never
+	// printed would satisfy that test perfectly, and the report would simply stop carrying the
+	// finding that tells a dead branch from the most dangerous kind of gap.
+	if !strings.Contains(rendered(t, card), "guards no test") {
+		t.Errorf("a guard that survived both ways must be reported:\n%s", rendered(t, card))
 	}
 }
 
@@ -620,5 +644,87 @@ func TestASweepWithNothingWrongSaysNothingAboutErroredTrials(t *testing.T) {
 	// reader to look for something that is not there.
 	if strings.Contains(report, "trials that went wrong") {
 		t.Errorf("a sweep where nothing went wrong must not report on it:\n%s", report)
+	}
+}
+
+// site builds a result at one named function and line, which is what the two lists below are
+// separated by.
+func site(function string, line int, outcome mutant.Outcome) mutant.Result {
+	found := result("a", "guard-never", outcome)
+	found.Mutant.Site.Func = function
+	found.Mutant.Site.Line = line
+
+	return found
+}
+
+func TestAFunctionATestEntersIsNotReportedAsOneNobodyHasWritten(t *testing.T) {
+	card := Tabulate([]mutant.Result{
+		// A test runs this function and kills a defect in it. It stops before the branch below.
+		site("defaultJobs", 20, mutant.Killed),
+		site("defaultJobs", 22, mutant.Unreached),
+		// Nothing runs this one at all.
+		site("writeResults", 40, mutant.Unreached),
+		site("writeResults", 41, mutant.Unreached),
+	}, nil)
+
+	byName := map[string]FunctionGap{}
+	for _, gap := range card.UnreachedFunctions {
+		byName[gap.Func] = gap
+	}
+
+	if len(byName) != 2 {
+		t.Fatalf("both functions have an unreached site, so both must be listed, got %+v", card.UnreachedFunctions)
+	}
+
+	// The remedies are different work. One is a test nobody has written; the other is a case
+	// nobody added to a test that is already in the file, already running, already passing.
+	// Telling somebody to write the second is how a report teaches its reader to distrust it.
+	if !byName["defaultJobs"].Entered() {
+		t.Error("a function a test runs part of must be reported as entered")
+	}
+	if byName["writeResults"].Entered() {
+		t.Error("a function no test runs at all must not be reported as entered")
+	}
+
+	report := rendered(t, card)
+	if !strings.Contains(report, "code no test runs") {
+		t.Errorf("the report must still name the functions no test enters:\n%s", report)
+	}
+	if !strings.Contains(report, "does not finish") {
+		t.Errorf("the report must separate the functions a test enters and stops short in:\n%s", report)
+	}
+}
+
+func TestAFunctionEveryTestFinishesIsNotListedAtAll(t *testing.T) {
+	card := Tabulate([]mutant.Result{
+		site("gate", 10, mutant.Killed),
+		site("gate", 11, mutant.Survived),
+	}, nil)
+
+	// Counting reach per function must not turn every function in the module into a line. The list
+	// is of gaps, and a function with no unreached site has none — a survivor in it is a finding
+	// the survivors section already carries.
+	if len(card.UnreachedFunctions) != 0 {
+		t.Errorf("a function with no unreached site is not a gap, got %+v", card.UnreachedFunctions)
+	}
+}
+
+func TestAFunctionWhoseMutantsDidNotCompileIsStillReportedAsEntered(t *testing.T) {
+	card := Tabulate([]mutant.Result{
+		// Reach is decided from the coverage profile before a trial runs, so an invalid mutant sits
+		// at a position the tests do enter. It simply proved nothing when it was tried.
+		site("incrementFloat", 30, mutant.Invalid),
+		site("incrementFloat", 31, mutant.Unreached),
+	}, nil)
+
+	if len(card.UnreachedFunctions) != 1 {
+		t.Fatalf("the function has an unreached site, so it must be listed, got %+v", card.UnreachedFunctions)
+	}
+
+	// Counting only the scored outcomes would send somebody to write a test for a function their
+	// tests already run — the exact confusion this split exists to end, one level further down and
+	// harder to see, because the report would be right about every other function on the page.
+	if !card.UnreachedFunctions[0].Entered() {
+		t.Error("a site whose mutant did not compile was still reached, so the function was entered")
 	}
 }

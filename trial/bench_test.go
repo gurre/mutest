@@ -799,3 +799,31 @@ func TestASweepInterruptedAfterTheLastBatchWasHandedOutStillSaysSo(t *testing.T)
 		t.Error("a sweep interrupted while its last trials ran must still say it did not finish")
 	}
 }
+
+func TestABaselineThatRanOutOfTimeSaysSoInItsSummary(t *testing.T) {
+	root := module(t, "package subject\n")
+
+	bench, err := NewBench(context.Background(), Options{
+		Source: root, Scratch: t.TempDir(), Width: 1,
+		Tester: &recordingTester{report: Report{Passed: true}},
+		Prober: &recordingProber{baseline: Baseline{Report: Report{TimedOut: true}}},
+	})
+	if err != nil {
+		t.Fatalf("preparing the bench must succeed, got error: %v", err)
+	}
+	defer bench.Close()
+
+	_, packages := bench.Run(context.Background(), []mutant.Mutant{aMutant()}, nil)
+
+	if len(packages) != 1 {
+		t.Fatalf("one package must be summarised, got %d", len(packages))
+	}
+
+	// Passed and TimedOut are both false-and-false for a suite that ran and failed, so a summary
+	// that drops this carries no way to tell the two apart. The caller then reports a budget the
+	// harness chose as a verdict about somebody's tests, and the package it accuses is the slowest
+	// one — which on a big module is the one whose measurement was worth the most.
+	if !packages[0].TimedOut {
+		t.Error("a baseline that ran out of time must say so in the summary, or it reads as a failing suite")
+	}
+}

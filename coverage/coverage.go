@@ -18,7 +18,23 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 )
+
+// The line buffer a scanner starts with and the ceiling it may grow to. A profile line is a file
+// name and six numbers; the ceiling is only for a deeply nested vendored path.
+const (
+	startingLine = 64 * 1024
+	maxLine      = 8 * 1024 * 1024
+)
+
+// scanLines is the line buffer every parse needs and no parse keeps. Parse runs once per package
+// per sweep and the buffer used to be made fresh each time, which was most of what a parse cost.
+var scanLines = sync.Pool{New: func() any {
+	buffer := make([]byte, startingLine)
+
+	return &buffer
+}}
 
 // Block is one basic block of a coverage profile: a half-open span of the source and how many
 // times the tests entered it.
@@ -78,7 +94,14 @@ func Parse(reader io.Reader, modulePath string) (Profile, error) {
 	var sawMode bool
 
 	scanner := bufio.NewScanner(reader)
-	scanner.Buffer(make([]byte, 64*1024), 8*1024*1024)
+
+	// Borrowed rather than made: a sweep parses one of these per package, and on a large module
+	// this line was almost the whole of what parsing a profile cost. Nothing the profile holds
+	// points into the buffer — parseBlock builds its own strings — so it goes back at the end.
+	borrowed := scanLines.Get().(*[]byte)
+	defer scanLines.Put(borrowed)
+
+	scanner.Buffer(*borrowed, maxLine)
 
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())

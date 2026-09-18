@@ -2,16 +2,37 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gurre/mutest/mutant"
 	"github.com/gurre/mutest/mutation"
 	"github.com/gurre/mutest/scorecard"
 	"github.com/gurre/mutest/trial"
 )
+
+// captureStderr redirects everything a sweep says about itself, and puts it back afterwards.
+//
+// The three functions that write it return nothing, so this is the only way to assert on what a
+// sweep tells somebody — and what it tells them at the moment a probe lands is the difference
+// between raising a flag and waiting out an hour for a report that says nothing.
+func captureStderr(t *testing.T) *bytes.Buffer {
+	t.Helper()
+
+	var said bytes.Buffer
+
+	saved := errOut
+	errOut = &said
+
+	t.Cleanup(func() { errOut = saved })
+
+	return &said
+}
 
 // usageText renders what -h prints.
 func usageText(t *testing.T) string {
@@ -273,11 +294,22 @@ func TestTheGateFlagsOwnSummarySaysWhatItCounts(t *testing.T) {
 }
 
 func TestASweepAlwaysHasAtLeastOneWorker(t *testing.T) {
+	jobs := defaultJobs()
+
 	// A machine with two cores or fewer would otherwise be given zero or a negative width, and a
 	// sweep with no workers settles every mutant it cannot try as errored — a report full of
 	// findings that say nothing, on the machines least able to spare the run.
-	if defaultJobs() < 1 {
-		t.Errorf("a sweep must always run at least one worker, got %d", defaultJobs())
+	if jobs < 1 {
+		t.Errorf("a sweep must always run at least one worker, got %d", jobs)
+	}
+
+	// The floor alone is not the whole rule, and on any ordinary machine it is met by answers that
+	// are badly wrong — the core count itself, or one. Each worker is a go command that takes a
+	// share of the machine on top of this number, so a default that filled the cores would ask for
+	// the core count squared. Leaving headroom is the property; the floor is what protects the two
+	// machines where the headroom would take it below one.
+	if cores := runtime.NumCPU(); cores > 3 && jobs >= cores {
+		t.Errorf("a sweep must leave the machine room for the compilers it starts, got %d of %d cores", jobs, cores)
 	}
 }
 
@@ -477,13 +509,62 @@ func TestAPackageTheSweepNeverReachedIsNotReportedAsAFailingSuite(t *testing.T) 
 	}
 }
 
+func TestAPackageWhoseBaselineRanOutOfTimeIsNotReportedAsAFailingSuite(t *testing.T) {
+	built := suites([]trial.PackageSummary{{Package: "trial", Mutants: 713, TimedOut: true}})
+
+	if len(built) != 1 {
+		t.Fatalf("one package in must be one suite out, got %d", len(built))
+	}
+
+	// A run that was stopped reached no verdict, so the zero value of Passed is not a finding — it
+	// is the absence of one. Reading it as "the tests were already failing" is the harness blaming
+	// somebody's suite for a budget the harness chose, and it is the hardest of these to notice
+	// because it needs a package slow enough to exceed the budget: the same commit then says
+	// different things on different machines, and the one it accuses is a suite that passes.
+	if strings.Contains(built[0].Failure, "already failing") {
+		t.Errorf("a baseline that ran out of time must not be called a failing suite, got %q", built[0].Failure)
+	}
+	if built[0].Failure == "" {
+		t.Error("a baseline that ran out of time must still say that nothing was learned about it")
+	}
+	// Without the remedy the reader is told a fact they cannot act on. -budget is the flag that
+	// changes it, and naming it is the difference between a warning and an instruction.
+	if !strings.Contains(built[0].Failure, "-budget") {
+		t.Errorf("the failure must name the flag that fixes it, got %q", built[0].Failure)
+	}
+}
+
 func TestAPackageWhoseTestsFailedIsStillReportedAsOne(t *testing.T) {
 	built := suites([]trial.PackageSummary{{Package: "mutation", Mutants: 12}})
 
-	// The case above must not have swallowed this one: a suite that really was red is the finding
+	// The cases above must not have swallowed this one: a suite that really was red is the finding
 	// that stops the whole package being scored off a failure that was there first.
 	if !strings.Contains(built[0].Failure, "already failing") {
 		t.Errorf("a package whose tests failed must say so, got %q", built[0].Failure)
+	}
+}
+
+func TestABaselineThatRanOutOfTimeIsSaidWhileTheSweepCanStillBeStopped(t *testing.T) {
+	said := captureStderr(t)
+
+	announce("trial", trial.Baseline{Report: trial.Report{TimedOut: true}})
+
+	// An hour is the difference between raising -budget and waiting out a sweep for a report that
+	// says nothing about the package. The summary carries the same fact, and it arrives too late.
+	if !strings.Contains(said.String(), "trial") || !strings.Contains(said.String(), "-budget") {
+		t.Errorf("a baseline that ran out of time must be announced as it lands, naming the remedy, got %q", said)
+	}
+}
+
+func TestAHealthyBaselineIsAnnouncedAsNothingAtAll(t *testing.T) {
+	said := captureStderr(t)
+
+	announce("mutation", trial.Baseline{Report: trial.Report{Passed: true}})
+
+	// Every line here is a thing to act on. A sweep that also narrated its successes would bury
+	// the three that matter under one line per package, which is how a warning stops being read.
+	if said.Len() != 0 {
+		t.Errorf("a probe that found nothing wrong must say nothing, got %q", said)
 	}
 }
 
@@ -533,5 +614,311 @@ func TestASizeIsPrintedInTheUnitItWasMeantIn(t *testing.T) {
 	floor := defaultDiskFloor
 	if floor.String() != "20GiB" {
 		t.Errorf("the disk floor must print as 20GiB, got %q", floor.String())
+	}
+
+	for _, written := range []struct {
+		size byteSize
+		want string
+	}{
+		// Zero is the flag's unset value. "0GiB" or "0MiB" would both read as a size somebody
+		// chose rather than as nothing set.
+		{0, "0"},
+		{1 << 30, "1GiB"},
+		{1 << 20, "1MiB"},
+		// Divisible by both units at once is the case a boundary mistake gets backwards: 1536MiB
+		// is 1.5GiB, which the GiB branch cannot render as a whole number, so it must fall through
+		// to MiB. A mutant widening the GiB guard's modulus check would instead drop the
+		// fractional part and print this as "1GiB", silently reporting a budget half its size.
+		{1536 << 20, "1536MiB"},
+		// Not an exact multiple of either unit, so the only honest rendering is the raw byte
+		// count — a cache budget one byte short of a mebibyte must not print as though it were a
+		// round number of anything.
+		{1<<20 - 1, "1048575"},
+	} {
+		if got := written.size.String(); got != written.want {
+			t.Errorf("%d bytes must print as %q, got %q", written.size, written.want, got)
+		}
+	}
+
+	// String has a pointer receiver, and -cache-budget and -disk-floor are registered with the
+	// flag package by address, which can in principle hand the Value interface a nil pointer
+	// before anything has pointed it at a real byteSize. A String that panicked on nil would crash
+	// whatever asked for the size — printing -h among them — instead of reporting it as unset.
+	var unset *byteSize
+	if unset.String() != "0" {
+		t.Errorf("a nil size must print as 0, got %q", unset.String())
+	}
+}
+
+// -results is the one artefact a sweep leaves behind after the terminal scrolls away, and it is
+// what a second tool reads to diff two sweeps or build a dashboard. If it did not decode as the
+// same results that went in, every consumer downstream of the flag would be reading nothing.
+func TestWriteResultsRoundTripsThroughJSON(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mutants.json")
+
+	results := []mutant.Result{
+		{
+			Mutant:  mutant.Mutant{Operator: "negate-conditional", Original: "==", Replacement: "!="},
+			Outcome: mutant.Survived,
+		},
+		{
+			Mutant:   mutant.Mutant{Operator: "guard-never"},
+			Outcome:  mutant.Killed,
+			KilledBy: []string{"TestSomething"},
+		},
+	}
+
+	if err := writeResults(path, results); err != nil {
+		t.Fatalf("writing results must succeed, got error: %v", err)
+	}
+
+	written, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading back %s: %v", path, err)
+	}
+
+	var decoded []mutant.Result
+	if err := json.Unmarshal(written, &decoded); err != nil {
+		t.Fatalf("the results file must decode as valid JSON, got error: %v\n%s", err, written)
+	}
+
+	if len(decoded) != 2 || decoded[0].Outcome != mutant.Survived || decoded[1].Outcome != mutant.Killed {
+		t.Errorf("the decoded results must match what was written, got %+v", decoded)
+	}
+	// KilledBy is the point of the whole exercise: it says which test is doing the work, and a
+	// round trip that dropped it would leave a reader of the file unable to tell.
+	if len(decoded[1].KilledBy) != 1 || decoded[1].KilledBy[0] != "TestSomething" {
+		t.Errorf("the decoded result must carry which test did the killing, got %+v", decoded[1])
+	}
+}
+
+// A sweep's findings can name source lines from a private repository, and -results can be pointed
+// at a directory somebody else on the machine can read. 0o600 is what keeps that private; a mode
+// drifting wider is a permissions bug nothing else exercises.
+func TestWriteResultsFileIsPrivate(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mutants.json")
+
+	if err := writeResults(path, nil); err != nil {
+		t.Fatalf("writing results must succeed, got error: %v", err)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("statting %s: %v", path, err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Errorf("the results file must be 0o600, got %o", info.Mode().Perm())
+	}
+}
+
+// A results path from a previous, larger sweep can already sit on disk when a smaller one runs
+// against the same path. Opening without O_TRUNC would leave the old bytes trailing after the new,
+// shorter document, and the file would stop being valid JSON — the one thing a machine reading it
+// back needs it to be.
+func TestWriteResultsTruncatesWhatWasThereBefore(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mutants.json")
+
+	var stale bytes.Buffer
+	for i := 0; i < 200; i++ {
+		stale.WriteString(`{"padding":"bytes a shorter write must not leave trailing behind"},`)
+	}
+	if err := os.WriteFile(path, stale.Bytes(), 0o600); err != nil {
+		t.Fatalf("seeding a longer file at %s: %v", path, err)
+	}
+
+	if err := writeResults(path, []mutant.Result{{Outcome: mutant.Killed}}); err != nil {
+		t.Fatalf("writing results over a longer existing file must succeed, got error: %v", err)
+	}
+
+	written, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading back %s: %v", path, err)
+	}
+	if len(written) >= stale.Len() {
+		t.Fatalf("the file must shrink to the new, shorter document, got %d bytes against %d seeded", len(written), stale.Len())
+	}
+
+	var decoded []mutant.Result
+	if err := json.Unmarshal(written, &decoded); err != nil {
+		t.Fatalf("overwriting a longer file must not leave trailing garbage after the new document: %v\n%s", err, written)
+	}
+	if len(decoded) != 1 {
+		t.Errorf("the results must be exactly what was written, got %+v", decoded)
+	}
+}
+
+// A results path that cannot be opened for writing must fail loudly. A sweep runs for twenty
+// minutes or more; swallowing this error would report success while silently discarding every
+// finding it collected.
+func TestWriteResultsToADirectoryFails(t *testing.T) {
+	dir := t.TempDir()
+
+	if err := writeResults(dir, []mutant.Result{{Outcome: mutant.Killed}}); err == nil {
+		t.Error("writing results to a path that is a directory must fail, not silently drop the findings")
+	}
+}
+
+// -version is the one line somebody pastes into a bug report, and it is what tells whoever reads
+// it whether the report reproduces on the build they have. release must therefore say everything
+// it knows, and only what it knows: leaving out the commit when one was stamped in is as much a
+// bug as inventing one that was not.
+func TestReleaseNamesTheVersionCommitAndDate(t *testing.T) {
+	savedVersion, savedCommit, savedDate := version, commit, date
+	t.Cleanup(func() { version, commit, date = savedVersion, savedCommit, savedDate })
+
+	// A `go install` build with nothing stamped in at link time still has a module version from
+	// the proxy, and that alone must be enough to name the build.
+	version, commit, date = "v1.2.3", "", ""
+	if got := release(); got != "mutest v1.2.3" {
+		t.Errorf("a version with no commit or date must render as %q, got %q", "mutest v1.2.3", got)
+	}
+
+	// A release build adds the commit. Somebody debugging a survivor that only shows up on one
+	// build needs to know exactly which commit they are looking at, not just which tag.
+	version, commit, date = "v1.2.3", "abc1234", ""
+	if got := release(); !strings.Contains(got, "(abc1234)") {
+		t.Errorf("a release with a commit must name it in parentheses, got %q", got)
+	}
+
+	// The build date is what tells a reader whether a report predates a fix that landed after it
+	// was built, which -version alone cannot answer for two builds sharing a tag.
+	stamp := time.Now().Format(time.RFC3339)
+	version, commit, date = "v1.2.3", "abc1234", stamp
+	if got := release(); !strings.Contains(got, "built "+stamp) {
+		t.Errorf("a release with a build date must say when it was built, got %q", got)
+	}
+}
+
+// A sweep where every package refused has not measured a suite at 0%, it has failed to measure
+// anything at all — and the difference is the whole point of the exit status. unmeasurable is
+// what tells the two apart, so each of its three answers has to be exercised on its own.
+func TestUnmeasurableSaysNothingWasAskedWhenThereAreNoPackages(t *testing.T) {
+	// No packages at all — targeting an empty module, say — is not the same fact as every package
+	// refusing, and reporting a failure here would blame the go command for a module with nothing
+	// in it.
+	if got := unmeasurable(nil); got != "" {
+		t.Errorf("no packages must not report a toolchain failure, got %q", got)
+	}
+}
+
+func TestUnmeasurableIsSilentIfAnyPackageWasMeasured(t *testing.T) {
+	// One package that answered is enough for the sweep to have something worth reporting. A
+	// scorecard built from the rest is still more useful than refusing the whole run because one
+	// package's tests could not be invoked.
+	packages := []trial.PackageSummary{
+		{Package: "a", ToolchainFailure: "go: no such tool"},
+		{Package: "b"},
+	}
+	if got := unmeasurable(packages); got != "" {
+		t.Errorf("one working package must mean the sweep has something to report, got %q", got)
+	}
+}
+
+func TestUnmeasurableNamesTheFirstFailureWhenEveryPackageRefused(t *testing.T) {
+	// This is the message run() puts in its own error, so it has to be a failure that actually
+	// happened rather than an empty string that would read as "everything is fine" while the exit
+	// status disagrees.
+	packages := []trial.PackageSummary{
+		{Package: "a", ToolchainFailure: "go: cannot find module providing package a"},
+		{Package: "b", ToolchainFailure: "go: build constraints exclude all Go files"},
+	}
+	if got := unmeasurable(packages); got != "go: cannot find module providing package a" {
+		t.Errorf("the first package's failure must be reported, got %q", got)
+	}
+}
+
+// plural is read at speed in a report line, and a boundary mistake in either direction reads as a
+// typo somebody should have caught: "1 files" is wrong the way a grammar checker would flag it,
+// and "2 file" is wrong the way it reads as a bug in the tool itself.
+func TestPluralAddsAnSOnlyWhenTheCountIsNotOne(t *testing.T) {
+	for _, written := range []struct {
+		count int
+		want  string
+	}{
+		{0, "files"},
+		{1, "file"},
+		{2, "files"},
+	} {
+		if got := plural(written.count, "file"); got != written.want {
+			t.Errorf("plural(%d, \"file\") must be %q, got %q", written.count, written.want, got)
+		}
+	}
+}
+
+// indented offsets a quoted go command diagnostic inside a sentence this tool wrote itself; without
+// it a reader cannot tell where the harness's own words end and the toolchain's begin. Every line
+// has to carry the offset, or a multi-line diagnostic reads as part of the sentence above it from
+// its second line on.
+func TestIndentedOffsetsEveryLineOfADiagnostic(t *testing.T) {
+	for _, written := range []struct {
+		text string
+		want string
+	}{
+		{"", "    "},
+		{"one line", "    one line"},
+		{"first\nsecond", "    first\n    second"},
+		// TrimRight drops a trailing newline before indenting, so a diagnostic shaped the way the
+		// go command's own error text is — ending in "\n" — does not grow a bare, un-indented blank
+		// line underneath it.
+		{"first\nsecond\n", "    first\n    second"},
+	} {
+		if got := indented(written.text); got != written.want {
+			t.Errorf("indented(%q) must be %q, got %q", written.text, written.want, got)
+		}
+	}
+}
+
+// A module built for another platform or another tag set can exclude nothing at all. A sweep that
+// still printed a line about it every time would train the reader to skip past that line, which is
+// exactly the one that matters on the day something really was left out.
+func TestBuildExclusionsSayNothingWhenNothingWasExcluded(t *testing.T) {
+	said := captureStderr(t)
+
+	sayWhatTheBuildLeftOut(nil)
+
+	if said.Len() != 0 {
+		t.Errorf("no excluded files must print nothing, got %q", said.String())
+	}
+}
+
+// named caps how many excluded files are printed by name before the rest are only counted, and the
+// boundary is exactly where index == named first fires. This is the case a fencepost mistake gets
+// wrong in either direction: cut the loop one short and the fifth file silently disappears into a
+// nonsensical "and 0 more"; extend it one long and a sixth file that should only be counted gets
+// named as well, which is the wall of filenames the cutoff exists to avoid in the first place.
+func TestBuildExclusionsNameExactlyFiveWithNoAndMoreLine(t *testing.T) {
+	said := captureStderr(t)
+
+	names := []string{"a.go", "b.go", "c.go", "d.go", "e.go"}
+	sayWhatTheBuildLeftOut(names)
+
+	output := said.String()
+	for _, name := range names {
+		if !strings.Contains(output, name) {
+			t.Errorf("all five excluded files must be named, %q is missing from %q", name, output)
+		}
+	}
+	if strings.Contains(output, "more") {
+		t.Errorf("exactly five excluded files must not print an \"and N more\" line, got %q", output)
+	}
+}
+
+func TestBuildExclusionsNameFiveThenCountTheRest(t *testing.T) {
+	said := captureStderr(t)
+
+	names := []string{"a.go", "b.go", "c.go", "d.go", "e.go", "f.go"}
+	sayWhatTheBuildLeftOut(names)
+
+	output := said.String()
+	for _, name := range names[:5] {
+		if !strings.Contains(output, name) {
+			t.Errorf("the first five excluded files must be named, %q is missing from %q", name, output)
+		}
+	}
+	if strings.Contains(output, "f.go") {
+		t.Errorf("the sixth excluded file must not be named individually, it must only be counted, got %q", output)
+	}
+	if !strings.Contains(output, "and 1 more") {
+		t.Errorf("the excess beyond the first five must be counted as \"and 1 more\", got %q", output)
 	}
 }

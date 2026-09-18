@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -524,5 +525,38 @@ func TestOnePackagesBuildFailureSummaryIsNotAnothersVerdict(t *testing.T) {
 
 	if subject(t, reports).CompileFailed {
 		t.Error("a summary line naming another package must not be read as this package's build failure")
+	}
+}
+
+// BenchmarkClassifyingOneTrialsStream measures the function a sweep runs most.
+//
+// Every trial is one go command and one pass over its output, so whatever this costs is paid
+// thousands of times in a sweep — against a run whose real work is compiling. It is here to keep
+// the two buffers it borrows from being made fresh again: that was most of what a trial allocated,
+// and nothing in the resulting report would have shown it.
+func BenchmarkClassifyingOneTrialsStream(b *testing.B) {
+	lines := []string{`{"Action":"start","Package":"example/subject"}`}
+	// A package of a hundred tests, each with the run/output/pass trio the go command emits. That
+	// is an ordinary suite, not a large one.
+	for index := range 100 {
+		name := "TestSomethingWorthChecking" + strconv.Itoa(index)
+		lines = append(lines,
+			`{"Action":"run","Package":"example/subject","Test":"`+name+`"}`,
+			`{"Action":"output","Package":"example/subject","Test":"`+name+`","Output":"=== RUN   `+name+`\n"}`,
+			`{"Action":"pass","Package":"example/subject","Test":"`+name+`","Elapsed":0.01}`,
+		)
+	}
+	lines = append(lines, `{"Action":"pass","Package":"example/subject","Elapsed":1.2}`)
+
+	source := stream(lines...).Bytes()
+
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for range b.N {
+		reports, _ := classify(bytes.NewBuffer(source), testModule)
+		if !reports["subject"].Passed {
+			b.Fatal("the stream must produce a passing report, or this benchmark measures the wrong path")
+		}
 	}
 }

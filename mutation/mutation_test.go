@@ -5,25 +5,40 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/gurre/mutest/mutant"
 )
 
-// moduleRoot is the module this command is part of, worked out from the compiler rather than
-// written down, so the benchmark below keeps measuring the real thing if the command moves.
+// moduleRoot is the module this command is part of, found by walking up from the directory the
+// test is running in rather than written down, so the benchmark below keeps measuring the real
+// thing if the command moves.
+//
+// The working directory rather than runtime.Caller: under -trimpath the compiler reports this
+// file as github.com/gurre/mutest/mutation/mutation_test.go, a path no filesystem has, and the
+// benchmark then fails to list a single package. That is not a corner somebody has to go looking
+// for — mutest puts -trimpath into GOFLAGS for every go command it starts, so the one thing this
+// benchmark measures was unmeasurable from inside a sweep of this very module.
 func moduleRoot(tb testing.TB) string {
 	tb.Helper()
 
-	_, thisFile, _, ok := runtime.Caller(0)
-	if !ok {
-		tb.Fatal("the compiler must be able to say where this file is")
+	directory, err := os.Getwd()
+	if err != nil {
+		tb.Fatalf("the test must be able to say which directory it runs in, got error: %v", err)
 	}
 
-	// This package is <module>/mutation, so the module root is one directory above it.
-	return filepath.Join(filepath.Dir(thisFile), "..")
+	for {
+		if _, err := os.Stat(filepath.Join(directory, "go.mod")); err == nil {
+			return directory
+		}
+
+		parent := filepath.Dir(directory)
+		if parent == directory {
+			tb.Fatal("no directory above this test holds a go.mod, so there is no module to measure")
+		}
+		directory = parent
+	}
 }
 
 // BenchmarkEnumeratingTheWholeModule measures what a sweep costs before it runs a single test.

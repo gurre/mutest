@@ -79,10 +79,17 @@ Two figures rather than one, because they need different work:
 Adding them together would name the work without saying what it is, so the report keeps them
 apart and prints their product as the single honest number.
 
+Code the tests do not cover is reported in two lists rather than one, because those need different
+work too: a function no test enters at all is a test nobody has written, and a function a test
+enters and returns from before reaching the rest of it is a case nobody added to a test that is
+already there. Sending somebody to write a test that already exists is how a report loses its
+reader.
+
 It also reports things nothing else does: packages whose suite was already failing (scored as
 `unmeasured` rather than credited with a perfect score off the failure that was there first),
-packages that skipped every test they have, tests that caught nothing anywhere, and the guards no
-test decides either way.
+packages whose unmutated run ran out of time — which is the harness's budget and not a verdict on
+anybody's tests — packages that skipped every test they have, tests that caught nothing anywhere,
+and the guards no test decides either way.
 
 That last one is a hint, not a verdict. Both directions of a branch surviving says no test
 observes the decision — which is a fact about the tests, not about the branch. A condition gating

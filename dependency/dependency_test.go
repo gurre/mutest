@@ -3,6 +3,7 @@ package dependency
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -300,5 +301,35 @@ func TestAPackageThatDoesNotCompileStillContributesWhatItLinks(t *testing.T) {
 	// go command in the first place, and it does not hold.
 	if graph.Independent("bad", "alpha") {
 		t.Error("a package that does not compile still links what it imports, and must not share a batch with it")
+	}
+}
+
+func TestTheSyntheticPackagesOfATestBinaryAreFoldedOntoTheirDirectory(t *testing.T) {
+	graph := loaded(t, map[string]string{
+		"alpha/alpha.go":      "package alpha\n\nimport _ \"example/beta\"\n",
+		"alpha/alpha_test.go": "package alpha\n\nimport \"testing\"\n\nfunc TestAlpha(t *testing.T) {}\n",
+		"beta/beta.go":        "package beta\n",
+	})
+
+	// Asked for a package that has tests, the go command reports it three more times under names of
+	// its own making: "example/alpha [example/alpha.test]" is the package compiled into its own test
+	// binary, and there is an external test package and the binary's main package beside it. Every
+	// one of them is the same directory, and a sweep names a package by its directory everywhere
+	// else — so a name left in this shape matches nothing the rest of the sweep asks about, and the
+	// batching that keeps two defects from being tried together silently stops finding it.
+	for _, name := range graph.Packages() {
+		if strings.Contains(name, " [") {
+			t.Errorf("%q is the go command's own name for a test binary, not a package of this module", name)
+		}
+	}
+
+	// The loop above agrees with anything if the fixture stopped producing those names, and a
+	// package with no test file does not produce them at all. These two say the graph was really
+	// read: alpha is in it under its directory name, and what it imports came through with it.
+	if !slices.Contains(graph.Packages(), "alpha") {
+		t.Fatalf("alpha has a test file, so it must be in the graph under its directory name, got %v", graph.Packages())
+	}
+	if graph.Independent("alpha", "beta") {
+		t.Error("alpha imports beta, so folding the synthetic names must not have lost the edge between them")
 	}
 }

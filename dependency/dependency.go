@@ -218,6 +218,10 @@ func graphOf(listed []listing, modulePath string) Graph {
 // It folds the synthetic names away first. "pkg [pkg.test]" is the package compiled for its own
 // test binary and "pkg.test" is that binary's main package; both are the same directory as pkg,
 // and an external test package "pkg_test [pkg.test]" is too.
+// Forcing the guard below to fire always is an equivalent mutant and no test can kill it: Cut
+// returns the whole string as its first result when the separator is absent, so the assignment is
+// an identity on every path the guard was protecting. It survives a sweep for that reason and not
+// because something here is unchecked.
 func packageDirOf(importPath, modulePath string) (string, bool) {
 	if variant, _, found := strings.Cut(importPath, " ["); found {
 		importPath = variant

@@ -1,6 +1,7 @@
 package mutant
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 )
@@ -200,5 +201,77 @@ func TestAMultiByteEditIsNotCutInHalf(t *testing.T) {
 	// in half and put a replacement character in a report that is otherwise quoted source.
 	if strings.Contains(candidate.String(), "�") {
 		t.Errorf("a shortened edit must not cut a rune in half, got %q", candidate.String())
+	}
+}
+
+func TestAReusedBufferProducesTheSameMutantAsAFreshOne(t *testing.T) {
+	source := []byte("package subject\n\nfunc total(a, b int) int { return a + b }\n")
+
+	first := Mutant{
+		Site:        Site{File: "s.go", Offset: 52, Length: 1},
+		Operator:    "arithmetic",
+		Original:    "+",
+		Replacement: "-",
+	}
+	// A shorter replacement than the first, so a buffer reused without being truncated would leave
+	// the tail of the previous mutant behind it.
+	second := Mutant{
+		Site:        Site{File: "s.go", Offset: 0, Length: len(source)},
+		Operator:    "remove-statement",
+		Original:    string(source),
+		Replacement: "package subject\n",
+	}
+
+	want, err := first.Apply(source)
+	if err != nil {
+		t.Fatalf("applying must succeed, got error: %v", err)
+	}
+
+	var scratch []byte
+
+	// The order that finds the bug: grow the buffer on the big mutant, then reuse it for the small
+	// one, then again for the big one.
+	for _, candidate := range []Mutant{first, second, first} {
+		scratch, err = candidate.AppendTo(scratch[:0], source)
+		if err != nil {
+			t.Fatalf("appending must succeed, got error: %v", err)
+		}
+	}
+
+	// A sweep applies one of these per mutant per trial and puts the file back afterwards. A buffer
+	// that carried bytes over between them would write a file differing from the original somewhere
+	// other than the site the report names — so the verdict would be about a defect nobody wrote,
+	// attributed to a line that never changed.
+	if !bytes.Equal(scratch, want) {
+		t.Errorf("a reused buffer must produce the same bytes as a fresh one:\n got %q\nwant %q", scratch, want)
+	}
+}
+
+func TestApplyDoesNotHandBackTheCallersBuffer(t *testing.T) {
+	source := []byte("package subject\n")
+
+	candidate := Mutant{
+		Site:        Site{File: "s.go", Offset: 8, Length: 7},
+		Operator:    "string-literal",
+		Original:    "subject",
+		Replacement: "other",
+	}
+
+	first, err := candidate.Apply(source)
+	if err != nil {
+		t.Fatalf("applying must succeed, got error: %v", err)
+	}
+
+	second, err := candidate.Apply(source)
+	if err != nil {
+		t.Fatalf("applying must succeed, got error: %v", err)
+	}
+
+	second[0] = 'X'
+
+	// Apply is the plain form and nothing tells its caller that the bytes are shared. Two results
+	// backed by one array would let a batch's second write corrupt the file its first one produced.
+	if first[0] == 'X' {
+		t.Error("two applications must not share an array")
 	}
 }

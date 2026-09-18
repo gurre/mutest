@@ -130,17 +130,33 @@ type Mutant struct {
 //
 //	mutated, err := m.Apply(original)
 func (m Mutant) Apply(source []byte) ([]byte, error) {
+	return m.AppendTo(nil, source)
+}
+
+// AppendTo is Apply writing into a caller's buffer, which it returns extended.
+//
+// Pass dst[:0] to reuse one buffer across a batch. A trial holds every file it mutated so it can
+// put them back, so the read cannot be pooled — but the mutated copy is dead the moment it reaches
+// the disk, and there is one of those per mutant per trial for the length of a sweep.
+//
+// dst must not overlap source. Appending source into a buffer backed by the same array would
+// overwrite the bytes still to be copied, and the result would be a file that differs from the
+// original somewhere other than the site the report names.
+//
+// Example:
+//
+//	scratch, err = m.AppendTo(scratch[:0], original)
+func (m Mutant) AppendTo(dst, source []byte) ([]byte, error) {
 	end := m.Site.Offset + m.Site.Length
 	if m.Site.Offset < 0 || end > len(source) {
 		return nil, fmt.Errorf("mutant at %s addresses bytes %d:%d of a %d byte file", m.Site, m.Site.Offset, end, len(source))
 	}
 
-	mutated := make([]byte, 0, len(source)-m.Site.Length+len(m.Replacement))
-	mutated = append(mutated, source[:m.Site.Offset]...)
-	mutated = append(mutated, m.Replacement...)
-	mutated = append(mutated, source[end:]...)
+	dst = append(dst, source[:m.Site.Offset]...)
+	dst = append(dst, m.Replacement...)
+	dst = append(dst, source[end:]...)
 
-	return mutated, nil
+	return dst, nil
 }
 
 // String renders a mutant as one line of a report.

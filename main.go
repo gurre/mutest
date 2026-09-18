@@ -41,6 +41,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"path"
@@ -63,7 +64,7 @@ import (
 
 func main() {
 	if err := run(); err != nil {
-		fmt.Fprintln(os.Stderr, "mutest:", err)
+		fmt.Fprintln(errOut, "mutest:", err)
 		os.Exit(1)
 	}
 }
@@ -515,7 +516,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stderr, "%d mutants across %d packages\n", len(mutants), len(targets))
+	fmt.Fprintf(errOut, "%d mutants across %d packages\n", len(mutants), len(targets))
 
 	if options.list {
 		for _, candidate := range mutants {
@@ -539,12 +540,12 @@ func run() error {
 	// running on the space that was already paid for.
 	reclaimed, err := sweep.Reclaim()
 	for _, abandoned := range reclaimed {
-		fmt.Fprintf(os.Stderr, "reclaimed %s, left behind by a sweep that did not finish\n", abandoned)
+		fmt.Fprintf(errOut, "reclaimed %s, left behind by a sweep that did not finish\n", abandoned)
 	}
 	if err != nil {
 		// Somebody else's directory in a shared temporary directory is a fact about the machine,
 		// not a reason to refuse to measure this module.
-		fmt.Fprintln(os.Stderr, "mutest: could not reclaim every abandoned scratch directory:", err)
+		fmt.Fprintln(errOut, "mutest: could not reclaim every abandoned scratch directory:", err)
 	}
 
 	// A sweep takes long enough that somebody will interrupt one. Cancelling rather than dying
@@ -564,7 +565,7 @@ func run() error {
 	}
 	defer cache.Close()
 
-	fmt.Fprintf(os.Stderr, "preparing %d module copies under %s\n", options.jobs, sweep.Dir())
+	fmt.Fprintf(errOut, "preparing %d module copies under %s\n", options.jobs, sweep.Dir())
 
 	bench, err := trial.NewBench(ctx, trial.Options{
 		Source:           module,
@@ -608,7 +609,7 @@ func run() error {
 	if _, err := card.WriteTo(os.Stdout); err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stderr, "\nswept in %s\n", time.Since(started).Truncate(time.Second))
+	fmt.Fprintf(errOut, "\nswept in %s\n", time.Since(started).Truncate(time.Second))
 
 	if options.results != "" {
 		if err := writeResults(options.results, results); err != nil {
@@ -677,6 +678,13 @@ func suites(packages []trial.PackageSummary) []scorecard.Suite {
 			suite.Failure = "the go command could not run the tests"
 		case summary.CompileFailed:
 			suite.Failure = "the package does not build"
+		// Before the verdict below, for the third time and the same reason. A run that was stopped
+		// reached no verdict, so calling it a failing suite reports the harness's own budget as a
+		// fact about somebody's tests. This is the one of the three that gets found the hard way:
+		// it needs a package slow enough to exceed the budget, which is a property of the machine
+		// as much as of the code, so the same commit says different things on different hardware.
+		case summary.TimedOut:
+			suite.Failure = "the unmutated tests ran out of time; raise -budget"
 		case !summary.NoTestFiles && !summary.Passed:
 			suite.Failure = "the tests were already failing"
 		}
@@ -701,20 +709,36 @@ func suites(packages []trial.PackageSummary) []scorecard.Suite {
 // otherwise interleave mid-line whenever stderr is a pipe, which is what it is under CI.
 var announcing sync.Mutex
 
+// errOut is everything a sweep says about itself, as opposed to the report, which goes to stdout
+// so it can be redirected on its own.
+//
+// A variable rather than os.Stderr written fourteen times: the three functions below are the
+// sweep's whole running commentary and none of them returns anything, so without a seam here the
+// only way to check what a sweep tells somebody is to read it and agree that it looks right.
+var errOut io.Writer = os.Stderr
+
 func announce(packageDir string, baseline trial.Baseline) {
 	announcing.Lock()
 	defer announcing.Unlock()
 
 	if baseline.ToolchainFailure != "" {
-		fmt.Fprintf(os.Stderr, "  the go command could not run the tests of %s:\n%s\n",
+		fmt.Fprintf(errOut, "  the go command could not run the tests of %s:\n%s\n",
 			packageDir, indented(baseline.ToolchainFailure))
+	}
+
+	// Said here rather than left to the report, which on a large module arrives an hour later.
+	// This is the one baseline failure somebody can still do something about while the sweep runs,
+	// and -budget is the thing to change.
+	if baseline.TimedOut {
+		fmt.Fprintf(errOut, "  the unmutated tests of %s ran out of time, so nothing there was measured; raise -budget\n",
+			packageDir)
 	}
 
 	// A sweep that quietly stopped gating on coverage looks exactly like one whose tests reach
 	// every line, so this warning is the only thing standing between a missing profile and a
 	// report that reads as good news.
 	if baseline.CoverageUnavailable != "" {
-		fmt.Fprintf(os.Stderr, "  no coverage for %s (%s); every site there was tried\n",
+		fmt.Fprintf(errOut, "  no coverage for %s (%s); every site there was tried\n",
 			packageDir, baseline.CoverageUnavailable)
 	}
 }
@@ -770,20 +794,20 @@ func sayWhatTheBuildLeftOut(excluded []string) {
 		return
 	}
 
-	fmt.Fprintf(os.Stderr, "%d %s excluded by build constraints for %s/%s, so nothing here measures them\n",
+	fmt.Fprintf(errOut, "%d %s excluded by build constraints for %s/%s, so nothing here measures them\n",
 		len(excluded), plural(len(excluded), "file"), runtime.GOOS, runtime.GOARCH)
 
 	const named = 5
 	for index, name := range excluded {
 		if index == named {
-			fmt.Fprintf(os.Stderr, "  and %d more\n", len(excluded)-named)
+			fmt.Fprintf(errOut, "  and %d more\n", len(excluded)-named)
 
 			break
 		}
-		fmt.Fprintf(os.Stderr, "  %s\n", name)
+		fmt.Fprintf(errOut, "  %s\n", name)
 	}
 
-	fmt.Fprintln(os.Stderr, "  sweep again with GOOS, GOARCH or -tags set for them to measure the rest")
+	fmt.Fprintln(errOut, "  sweep again with GOOS, GOARCH or -tags set for them to measure the rest")
 }
 
 // plural keeps a count reading as English, because a line read at speed stops the reader on
@@ -927,7 +951,7 @@ func (p *progress) report(done, total int) {
 		remaining = (elapsed / time.Duration(done)) * time.Duration(total-done)
 	}
 
-	fmt.Fprintf(os.Stderr, "  %d/%d  %s elapsed  %s remaining\n",
+	fmt.Fprintf(errOut, "  %d/%d  %s elapsed  %s remaining\n",
 		done, total, elapsed.Truncate(time.Second), remaining.Truncate(time.Second))
 }
 

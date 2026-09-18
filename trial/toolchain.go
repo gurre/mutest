@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gurre/mutest/coverage"
@@ -152,9 +153,17 @@ func (t Toolchain) execute(ctx context.Context, moduleDir string, packages []str
 	command.Dir = moduleDir
 	command.Env = t.environment()
 
-	var stream bytes.Buffer
-	command.Stdout = &stream
-	command.Stderr = &stream
+	// Borrowed rather than made: a sweep is one of these per trial, thousands of times, and a
+	// stream that has already grown to the size a package's output runs to does not grow again.
+	// Safe to hand back below because Run waits for the copying to finish, and nothing classify
+	// returns points into these bytes — every string in a Report comes out of the JSON decoder.
+	stream := streams.Get().(*bytes.Buffer)
+	stream.Reset()
+
+	defer streams.Put(stream)
+
+	command.Stdout = stream
+	command.Stderr = stream
 
 	started := time.Now()
 	_ = command.Run()
@@ -163,7 +172,7 @@ func (t Toolchain) execute(ctx context.Context, moduleDir string, packages []str
 	// A non-zero exit says only that something in the invocation failed, and under a batch that
 	// could be any member. Every verdict below is read from the stream, per package, so one
 	// package's failure never colours another's.
-	reports, diagnostic := classify(&stream, t.modulePath(moduleDir))
+	reports, diagnostic := classify(stream, t.modulePath(moduleDir))
 
 	// The go command's own -timeout panics a test binary with a line the classifier recognises,
 	// which is the usual way a hang is reported. When even that does not arrive, this deadline is
@@ -264,6 +273,43 @@ func (t Toolchain) modulePath(moduleDir string) string {
 	return path
 }
 
+// The line buffer a scanner starts with and the ceiling it may grow to. A test2json line is
+// normally well under the first; the ceiling is for a test that logs a large blob on one line.
+const (
+	startingLine = 64 * 1024
+	maxLine      = 8 * 1024 * 1024
+)
+
+// streams and scanLines are the two buffers every invocation needs and no invocation keeps.
+//
+// A sweep is thousands of trials, and each one used to make a fresh 64 KiB scan buffer and a
+// fresh output buffer that grew from nothing to whatever the go command printed. Between them
+// they were the largest source of garbage in a sweep, and neither outlives the call that borrows
+// it. They are package-level because execute has a value receiver and runs on every worker at
+// once, so a field on the Toolchain would be shared without being synchronised.
+var (
+	streams   = sync.Pool{New: func() any { return new(bytes.Buffer) }}
+	scanLines = sync.Pool{New: func() any {
+		buffer := make([]byte, startingLine)
+
+		return &buffer
+	}}
+)
+
+// testEvent is one line of the go command's test2json stream.
+type testEvent struct {
+	Action string `json:"Action"`
+	// Package is the import path every package-scoped and test-scoped event carries.
+	Package string `json:"Package"`
+	Test    string `json:"Test"`
+	Output  string `json:"Output"`
+	// Elapsed is seconds, present on a package's terminal event.
+	Elapsed float64 `json:"Elapsed"`
+	// FailedBuild names the package whose build failed. Its presence is the compile failure; the
+	// text of the error is only ever diagnostic.
+	FailedBuild string `json:"FailedBuild"`
+}
+
 // gathering is one package's verdict as it accumulates over the stream.
 type gathering struct {
 	report  Report
@@ -310,7 +356,16 @@ func classify(stream *bytes.Buffer, modulePath string) (Reports, string) {
 	}
 
 	scanner := bufio.NewScanner(stream)
-	scanner.Buffer(make([]byte, 64*1024), 8*1024*1024)
+
+	borrowed := scanLines.Get().(*[]byte)
+	defer scanLines.Put(borrowed)
+
+	scanner.Buffer(*borrowed, maxLine)
+
+	// Declared once rather than per line. It escapes into the decoder either way, so inside the
+	// loop this is one heap allocation for every line the go command prints, in the one function
+	// a sweep runs most. Absent fields are left alone by the decoder, so it is cleared per line.
+	var event testEvent
 
 	for scanner.Scan() {
 		line := scanner.Bytes()
@@ -330,18 +385,7 @@ func classify(stream *bytes.Buffer, modulePath string) (Reports, string) {
 			continue
 		}
 
-		var event struct {
-			Action string `json:"Action"`
-			// Package is the import path every package-scoped and test-scoped event carries.
-			Package string `json:"Package"`
-			Test    string `json:"Test"`
-			Output  string `json:"Output"`
-			// Elapsed is seconds, present on a package's terminal event.
-			Elapsed float64 `json:"Elapsed"`
-			// FailedBuild names the package whose build failed. Its presence is the compile
-			// failure; the text of the error is only ever diagnostic.
-			FailedBuild string `json:"FailedBuild"`
-		}
+		event = testEvent{}
 		if json.Unmarshal(line, &event) != nil {
 			continue
 		}

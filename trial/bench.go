@@ -181,6 +181,10 @@ type PackageSummary struct {
 	CompileFailed bool
 	// Passed means the unmutated tests passed.
 	Passed bool
+	// TimedOut means the unmutated run ran out of time rather than reaching a verdict. Nothing was
+	// learned about these tests either — and without this the zero value of Passed reads as a suite
+	// that ran and failed, which blames the caller's tests for a budget the harness chose.
+	TimedOut bool
 	// CoverageUnavailable says why there is no profile, empty when there was one.
 	CoverageUnavailable string
 	// ToolchainFailure is what the go command said when it refused the invocation, empty when it
@@ -485,6 +489,7 @@ func (b *Bench) Run(ctx context.Context, mutants []mutant.Mutant, observe Observ
 			SkipOnly:            baseline.SkipOnly(),
 			CompileFailed:       baseline.CompileFailed,
 			Passed:              baseline.Passed,
+			TimedOut:            baseline.TimedOut,
 			CoverageUnavailable: baseline.CoverageUnavailable,
 			ToolchainFailure:    baseline.ToolchainFailure,
 			// Only where there was a prober to reach. A bench given a substituted tester and no
@@ -979,6 +984,11 @@ func (b *Bench) tryBatch(ctx context.Context, moduleDir string, batch []assignme
 
 	budget := time.Duration(0)
 
+	// One buffer for every mutant in the batch. The file each is read from has to be held until the
+	// restore above, so those cannot be shared — but the mutated copy is finished with as soon as it
+	// is written, and a sweep makes one per mutant per trial.
+	var scratch []byte
+
 	for _, next := range batch {
 		target := filepath.Join(moduleDir, filepath.FromSlash(next.mutant.Site.File))
 
@@ -986,7 +996,8 @@ func (b *Bench) tryBatch(ctx context.Context, moduleDir string, batch []assignme
 		original, err := os.ReadFile(target) //nolint:gosec
 		if err == nil {
 			var mutated []byte
-			if mutated, err = next.mutant.Apply(original); err == nil {
+			if mutated, err = next.mutant.AppendTo(scratch[:0], original); err == nil {
+				scratch = mutated
 				restore[target] = original
 				err = os.WriteFile(target, mutated, 0o600)
 			}

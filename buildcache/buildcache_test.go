@@ -3,6 +3,7 @@ package buildcache
 import (
 	"bytes"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,8 +17,12 @@ import (
 // keeps saying it whenever it is run. A fixed date would stop meaning that.
 type cacheFile struct {
 	name string
-	size int
+	size int64
 	age  time.Duration
+	// written overrides the age with an exact moment, for the one decision that turns on two
+	// entries sharing a modification time. Ageing them by the same duration does not produce that:
+	// each is stamped as the loop reaches it, so two files of the same age differ by nanoseconds.
+	written time.Time
 }
 
 // digest names a cache entry the way the go command does: two hex characters naming the shard, a
@@ -38,11 +43,25 @@ func cacheLike(t *testing.T, files ...cacheFile) string {
 		}
 
 		path := filepath.Join(shard, file.name)
-		if err := os.WriteFile(path, make([]byte, file.size), 0o600); err != nil {
+		// Sized rather than written. What the cache measures is what the filesystem reports, so a
+		// hole is an entry of that size as far as every decision here is concerned — and that is
+		// what lets a test lay down the hundreds of megabytes the pause threshold is expressed in
+		// without asking the machine running it for the disk or the seconds to do so.
+		handle, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+		if err != nil {
 			t.Fatalf("seeding %s: %v", file.name, err)
+		}
+		if err := handle.Truncate(file.size); err != nil {
+			t.Fatalf("sizing %s: %v", file.name, err)
+		}
+		if err := handle.Close(); err != nil {
+			t.Fatalf("closing %s: %v", file.name, err)
 		}
 
 		written := time.Now().Add(-file.age)
+		if !file.written.IsZero() {
+			written = file.written
+		}
 		if err := os.Chtimes(path, written, written); err != nil {
 			t.Fatalf("ageing %s: %v", file.name, err)
 		}
@@ -517,5 +536,382 @@ func TestACacheOnAFilesystemWithNoLocksIsStillHeldToItsBudget(t *testing.T) {
 	}
 	if freed == 0 || present(t, directory, trial) {
 		t.Error("a cache with no lock available must still be held to its budget")
+	}
+}
+
+// withFloor opens a cache and then gives it a disk floor.
+//
+// The floor is chosen so the real answer cannot straddle it rather than by stubbing the syscall:
+// math.MaxInt64 free bytes is a disk nobody has, and one byte is a floor every disk clears. That
+// keeps these tests saying the same thing on a full laptop and an empty CI runner.
+//
+// Set after opening because Open refuses a floor it cannot meet, which is the behaviour a sweep
+// wants and the opposite of what a test of the floor needs: the refusal happens before there is a
+// cache to ask anything of.
+func withFloor(t *testing.T, directory string, budget, floor int64) (*Cache, *bytes.Buffer) {
+	t.Helper()
+
+	cache, said := opened(t, directory, budget)
+	cache.floor = floor
+
+	return cache, said
+}
+
+func TestASweepStopsRatherThanFillTheDisk(t *testing.T) {
+	directory := cacheLike(t, cacheFile{name: digest(1, "d"), size: 4 << 20, age: time.Minute})
+
+	cache, _ := withFloor(t, directory, 1<<20, math.MaxInt64)
+	cache.keep = map[string]bool{}
+	cache.retained = true
+
+	// This is the only error Trim returns and the only thing that stops a sweep on a disk that is
+	// filling. Without it the sweep keeps compiling into a directory with nothing left to give,
+	// and what fails is not the sweep but whatever else on the machine needed the space — which is
+	// a much worse failure than a run that stopped and said why.
+	freed, err := cache.Trim()
+	if err == nil {
+		t.Fatalf("a cache below its disk floor must refuse to continue, freed %d", freed)
+	}
+	// The three numbers are what turns the refusal into a decision: how much is left, how much was
+	// being kept clear, and where. A bare "not enough disk" leaves somebody guessing which flag.
+	if !strings.Contains(err.Error(), directory) || !strings.Contains(err.Error(), "free") {
+		t.Errorf("the refusal must say where and how much, got %q", err)
+	}
+}
+
+func TestAFloorTheDiskClearsStopsNothing(t *testing.T) {
+	directory := cacheLike(t, cacheFile{name: digest(1, "d"), size: 4 << 20, age: time.Minute})
+
+	cache, _ := withFloor(t, directory, 1<<20, 1)
+	cache.keep = map[string]bool{}
+	cache.retained = true
+
+	// The case above must not have been bought by refusing every sweep. A floor of one byte is met
+	// by any disk that can hold the cache at all, and a sweep that stopped here would be one this
+	// harness could never run on a machine it had already fitted on.
+	if _, err := cache.Trim(); err != nil {
+		t.Errorf("a disk above the floor must not stop the sweep, got error: %v", err)
+	}
+}
+
+func TestAFillingDiskIsWorthStoppingTheSweepFor(t *testing.T) {
+	directory := cacheLike(t, cacheFile{name: digest(1, "d"), size: 1 << 20, age: time.Minute})
+
+	cache, _ := withFloor(t, directory, 1<<40, math.MaxInt64)
+
+	// Due is polled between trials and is the only thing that asks the question while there is
+	// still room to answer it. The budget here is far above what is on disk, so nothing but the
+	// floor can make this true — which is the point: running out of disk is not the same fault as
+	// exceeding a budget, and only one of them ends the sweep.
+	if !cache.Due() {
+		t.Error("a cache below its disk floor must stop the sweep even when it is under budget")
+	}
+}
+
+func TestAPassIsWorthStoppingForOnceThereIsEnoughToFree(t *testing.T) {
+	keeping := digest(1, "d")
+	spent := digest(2, "d")
+
+	directory := cacheLike(t,
+		cacheFile{name: keeping, size: 300 << 20, age: time.Hour},
+		cacheFile{name: spent, size: 300 << 20, age: time.Minute},
+	)
+
+	cache, _ := opened(t, directory, 100<<20)
+	cache.keep = map[string]bool{keeping: true}
+	cache.retained = true
+
+	// Stopping the sweep costs every worker the trial it is running, so it is only worth doing when
+	// there is enough to remove to be worth the pause. Here there is: 300 MiB of trial output over
+	// a 100 MiB budget.
+	if !cache.Due() {
+		t.Error("a cache over budget with a pass worth making must ask for one")
+	}
+}
+
+func TestAPassThatCouldOnlyFreeTheDependencyGraphIsNotWorthStoppingFor(t *testing.T) {
+	keeping := digest(1, "d")
+
+	directory := cacheLike(t, cacheFile{name: keeping, size: 600 << 20, age: time.Hour})
+
+	cache, _ := opened(t, directory, 100<<20)
+	cache.keep = map[string]bool{keeping: true}
+	cache.retained = true
+
+	// Over budget, and by a lot — but all of it is the graph the sweep is compiling against, so a
+	// pause would stop every worker to free nothing. Asking the size question without asking what
+	// is evictable is how a sweep spends its time pausing once a minute for the rest of the run.
+	if cache.Due() {
+		t.Error("a cache whose excess is all dependency graph must not stop the sweep")
+	}
+}
+
+func TestACacheUnderItsBudgetIsNotWorthStoppingFor(t *testing.T) {
+	spent := digest(2, "d")
+
+	directory := cacheLike(t, cacheFile{name: spent, size: 300 << 20, age: time.Minute})
+
+	cache, said := opened(t, directory, 1<<40)
+	cache.keep = map[string]bool{}
+	cache.retained = true
+
+	// There is plenty here that could be evicted; there is simply no reason to. A sweep that paused
+	// on the amount it could free rather than on being over budget would pause on every large cache,
+	// which is every cache a real module produces.
+	if cache.Due() {
+		t.Error("a cache under its budget must not stop the sweep however much is evictable")
+	}
+	if said.Len() != 0 {
+		t.Errorf("a cache under its budget has nothing to report, got %q", said)
+	}
+}
+
+func TestABudgetSmallerThanTheDependencyGraphIsSaidOutLoud(t *testing.T) {
+	keeping := digest(1, "d")
+
+	directory := cacheLike(t, cacheFile{name: keeping, size: 8 << 20, age: time.Hour})
+
+	said := &bytes.Buffer{}
+	// Built rather than opened and retained: Retain says this itself on the way past and sets the
+	// flag that makes it a once-only message, so a cache that reached this state through Retain can
+	// never reach this line. The state is what is under test, not the route to it.
+	cache := &Cache{
+		directory: directory,
+		budget:    1 << 20,
+		report:    said,
+		keep:      map[string]bool{keeping: true},
+		evicted:   map[string]bool{},
+		retained:  true,
+		lockless:  true,
+	}
+
+	if _, err := cache.Trim(); err != nil {
+		t.Fatalf("a pass that can free nothing is not an error, got %v", err)
+	}
+
+	// A budget below the size of the graph is a budget that cannot be met. Silently pausing to free
+	// nothing, once a minute, for the length of the run, looks exactly like a sweep that has become
+	// slow for no reason — and the remedy is a flag nobody would think to change.
+	if !strings.Contains(said.String(), "raise -cache-budget") {
+		t.Errorf("a budget that cannot be met must name the flag that fixes it, got %q", said)
+	}
+}
+
+func TestTheSweepIsOnlyToldOnceThatItsBudgetCannotBeMet(t *testing.T) {
+	keeping := digest(1, "d")
+
+	directory := cacheLike(t, cacheFile{name: keeping, size: 8 << 20, age: time.Hour})
+
+	said := &bytes.Buffer{}
+	cache := &Cache{
+		directory: directory,
+		budget:    1 << 20,
+		report:    said,
+		keep:      map[string]bool{keeping: true},
+		evicted:   map[string]bool{},
+		retained:  true,
+		warned:    true,
+		lockless:  true,
+	}
+
+	if _, err := cache.Trim(); err != nil {
+		t.Fatalf("a pass that can free nothing is not an error, got %v", err)
+	}
+
+	// The poll comes round every minute. A sweep that repeated this would bury its own report under
+	// an hour of the same line, which is how a warning worth reading stops being read.
+	if said.Len() != 0 {
+		t.Errorf("the warning must be said once, not on every pass, got %q", said)
+	}
+}
+
+func TestAnEvictionSaysHowMuchOfTheGraphItRebuiltAround(t *testing.T) {
+	graph := digest(1, "d")
+	rebuilt := digest(2, "d")
+	spent := digest(3, "d")
+
+	directory := cacheLike(t,
+		cacheFile{name: graph, size: 1 << 20, age: time.Hour},
+		cacheFile{name: spent, size: 8 << 20, age: time.Minute},
+	)
+
+	cache, said := opened(t, directory, 4<<20)
+	cache.keep = map[string]bool{graph: true}
+	cache.retained = true
+	// On disk and named by the last pass as something it removed: the go command has rebuilt it
+	// since, which means something needed it that the snapshot did not know about. It is adopted
+	// into the keep set on the way past rather than evicted again, and again, for the whole sweep.
+	cache.evicted = map[string]bool{rebuilt: true}
+
+	if err := os.MkdirAll(filepath.Join(directory, rebuilt[:2]), 0o750); err != nil {
+		t.Fatalf("seeding the shard for the rebuilt entry: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, rebuilt[:2], rebuilt), make([]byte, 1<<20), 0o600); err != nil {
+		t.Fatalf("seeding the rebuilt entry: %v", err)
+	}
+
+	if _, err := cache.Trim(); err != nil {
+		t.Fatalf("trimming must succeed, got error: %v", err)
+	}
+
+	// Without this the line says a number that does not add up: bytes evicted and bytes remaining,
+	// with the difference silently kept. Somebody reading it to work out whether the budget is
+	// doing anything has no way to see that a rebuild was the reason.
+	if !strings.Contains(said.String(), "kept 1 rebuilt") {
+		t.Errorf("an eviction that adopted a rebuilt entry must say so, got %q", said)
+	}
+}
+
+func TestAnEvictionThatAdoptedNothingSaysNothingAboutRebuilds(t *testing.T) {
+	graph := digest(1, "d")
+	spent := digest(3, "d")
+
+	directory := cacheLike(t,
+		cacheFile{name: graph, size: 1 << 20, age: time.Hour},
+		cacheFile{name: spent, size: 8 << 20, age: time.Minute},
+	)
+
+	cache, said := opened(t, directory, 4<<20)
+	cache.keep = map[string]bool{graph: true}
+	cache.retained = true
+
+	if _, err := cache.Trim(); err != nil {
+		t.Fatalf("trimming must succeed, got error: %v", err)
+	}
+
+	// The clause above is conditional for a reason: "kept 0 rebuilt" on every ordinary pass is a
+	// number that means nothing and trains the reader to skip the line the one time it matters.
+	if strings.Contains(said.String(), "rebuilt") {
+		t.Errorf("an eviction that adopted nothing must not mention rebuilds, got %q", said)
+	}
+}
+
+func TestTwoEntriesOfTheSameAgeAreEvictedInAStableOrder(t *testing.T) {
+	// Named so that name order and age order disagree: the oldest entry sorts last alphabetically,
+	// so a pass that went by name alone would take the two young ones first and leave the old one.
+	oldest := digest(9, "d")
+	earlier := digest(2, "d")
+	later := digest(3, "d")
+
+	// The same instant, not the same age: two files aged by one duration are stamped as the loop
+	// reaches each, so they differ by nanoseconds and the tie this is about never happens.
+	together := time.Now().Add(-time.Minute)
+
+	directory := cacheLike(t,
+		cacheFile{name: oldest, size: 10 << 20, age: time.Hour},
+		cacheFile{name: earlier, size: 1 << 20, written: together},
+		cacheFile{name: later, size: 1 << 20, written: together},
+	)
+
+	// 12 MiB against a 3 MiB budget, so the pass runs down to a 1.5 MiB low-water mark: the oldest
+	// entry goes, then exactly one of the pair, and the tie decides which. Any budget that took
+	// both would say nothing about the order they were considered in.
+	cache, _ := opened(t, directory, 3<<20)
+	cache.keep = map[string]bool{}
+	cache.retained = true
+
+	if _, err := cache.Trim(); err != nil {
+		t.Fatalf("trimming must succeed, got error: %v", err)
+	}
+
+	if present(t, directory, oldest) {
+		t.Error("the oldest entry must go first, whatever it is called")
+	}
+
+	// Exactly one of the pair has to go, and a sort with no tiebreak picks whichever way an unstable
+	// sort happened to land. Two sweeps over the same module would then evict different entries and
+	// rebuild different things, so a run's timings would not be comparable with its own repeat.
+	if present(t, directory, earlier) {
+		t.Errorf("of two entries written at the same instant the first by name must go, %s survived", earlier)
+	}
+	if !present(t, directory, later) {
+		t.Errorf("a pass stops at the low-water mark, so %s must survive", later)
+	}
+}
+
+func TestASweepThatLostItsLockSaysSoRatherThanEvictingOn(t *testing.T) {
+	directory := cacheLike(t, cacheFile{name: digest(1, "d"), size: 4 << 20, age: time.Minute})
+
+	cache, said := opened(t, directory, 1<<20)
+	cache.keep = map[string]bool{}
+	cache.retained = true
+
+	if _, err := cache.Trim(); err != nil {
+		t.Fatalf("trimming must succeed, got error: %v", err)
+	}
+
+	// A sweep holding its lock must not announce that it lost one. The message is how somebody
+	// learns that another sweep may now remove what this one is compiling against, and printing it
+	// on an ordinary pass makes it noise the one time it is true.
+	if strings.Contains(said.String(), "lost the build cache lock") {
+		t.Errorf("a sweep that holds its lock must not report losing it, got %q", said)
+	}
+}
+
+func TestACacheWithNoLockToHoldEvictsNothingRatherThanReportingALostOne(t *testing.T) {
+	directory := cacheLike(t, cacheFile{name: digest(1, "d"), size: 4 << 20, age: time.Minute})
+
+	said := &bytes.Buffer{}
+	// No holder: the lock file could not be opened when the cache was. Locking is advisory and a
+	// sweep carries on without it, so this is a state a real run reaches.
+	cache := &Cache{
+		directory: directory,
+		budget:    1 << 20,
+		report:    said,
+		keep:      map[string]bool{},
+		evicted:   map[string]bool{},
+		retained:  true,
+	}
+
+	if _, err := cache.Trim(); err != nil {
+		t.Fatalf("a cache with no lock must not fail, got error: %v", err)
+	}
+
+	// Without the nil check the file operations are attempted on a nil handle, which does not panic
+	// — it returns "bad file descriptor" — and the sweep then reports having lost a lock it never
+	// held. That reads as another sweep having taken the cache, which is a different situation with
+	// a different remedy.
+	if strings.Contains(said.String(), "lost the build cache lock") {
+		t.Errorf("a cache that never held a lock must not report losing one, got %q", said)
+	}
+	// Advisory locking is what keeps one sweep from removing the archives another has already
+	// resolved to paths and is about to open. A sweep that could not take the lock has no way to
+	// know it is alone, so it evicts nothing rather than guessing.
+	if !present(t, directory, digest(1, "d")) {
+		t.Error("a cache with no lock to take must evict nothing")
+	}
+}
+
+func TestTheCacheGoesWhereXDGSaysWhenItSaysAnything(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", home)
+
+	directory, err := defaultDirectory()
+	if err != nil {
+		t.Fatalf("finding the default directory must succeed, got error: %v", err)
+	}
+
+	// The variable is followed rather than the platform's own convention so that a machine which
+	// sets it and the one beside it that does not put the cache in the same place. A sweep that
+	// ignored it would compile into a directory the operator has excluded from their backups — or
+	// worse, one they have not.
+	if directory != filepath.Join(home, "mutest", "build") {
+		t.Errorf("XDG_CACHE_HOME must decide where the cache goes, got %s", directory)
+	}
+}
+
+func TestTheCacheStillHasSomewhereToGoWithoutXDG(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", "")
+
+	directory, err := defaultDirectory()
+	if err != nil {
+		t.Fatalf("finding the default directory must succeed, got error: %v", err)
+	}
+
+	// An empty variable is not a choice of directory. Joining onto it would put the cache at
+	// /mutest/build, which on most machines is a path the sweep cannot create — so a sweep that
+	// asked for no particular cache would fail to start at all.
+	if directory == "" || !filepath.IsAbs(directory) {
+		t.Errorf("the cache must have an absolute home even with no XDG_CACHE_HOME, got %q", directory)
 	}
 }
