@@ -54,6 +54,12 @@ checksum:
 changelog:
   use: github
   sort: asc
+  # Stated rather than defaulted. GoReleaser's default format ends in the commit's author — the
+  # GitHub username if it can resolve one, and the raw name and email address from the commit if it
+  # cannot. Release notes are the most widely read page this project publishes, and what belongs
+  # there is what changed, not who to write to. Every commit already carries its own authorship for
+  # anyone who wants it.
+  format: "{{ .SHA }}: {{ .Message }}"
   filters:
     exclude:
       - "^docs:"
