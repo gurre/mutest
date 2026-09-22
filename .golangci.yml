@@ -24,6 +24,11 @@ linters:
           - gosec
 
 formatters:
+  # Enabled rather than only configured. In v2 a formatter is off unless it is named here, so the
+  # settings below were decoration: nothing read them, and "gofmt -l" in CI does not check import
+  # grouping. Named here, "golangci-lint run" reports a violation and "golangci-lint fmt" fixes it.
+  enable:
+    - goimports
   settings:
     goimports:
       # put imports beginning with prefix after 3rd-party packages

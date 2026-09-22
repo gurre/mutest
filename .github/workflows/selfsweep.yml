@@ -35,7 +35,10 @@ jobs:
       # counts none of them here. It is measured now, so this number covers the whole module and is
       # not comparable with the one it replaces.
       - run: go run . -results mutants.json -disk-floor 1GiB -cache-budget 4GiB -fail-on 1100
-      - uses: actions/upload-artifact@v4
+      # This job runs on a schedule and nowhere else, so this is the one action no pull request
+      # exercises, and "if: always()" means a broken upload sits behind a step that still passes.
+      # Kept current by hand for that reason rather than left on whatever version once worked.
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: mutants

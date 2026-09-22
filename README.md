@@ -189,7 +189,8 @@ The packages under `internal/` are this command's own machinery, not an API. The
 the harness's convenience and they change without notice.
 
 Before sending a change, run `go test -race -count=1 ./...`, `golangci-lint run`, and a sweep over
-the package you touched. This repository is the one place to run a sweep as `go run . -packages
+the package you touched. `golangci-lint run` reports a formatting violation but does not fix one;
+`golangci-lint fmt` does. This repository is the one place to run a sweep as `go run . -packages
 <the package you touched>` rather than as an installed binary: what you want measured is the working
 copy, and an installed `mutest` would be measuring it with whatever was on your `PATH` last week.
 
