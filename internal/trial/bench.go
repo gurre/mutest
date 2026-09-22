@@ -992,14 +992,17 @@ func (b *Bench) tryBatch(ctx context.Context, moduleDir string, batch []assignme
 	for _, next := range batch {
 		target := filepath.Join(moduleDir, filepath.FromSlash(next.mutant.Site.File))
 
-		// target is inside this bench's own scratch copy, built from a path this process generated.
+		// target is inside this bench's own scratch copy, built from a path this process generated:
+		// Site.File comes from the enumerator's own walk of the module root, and a package named on
+		// the command line that climbs out of the module is refused before a sweep starts. The read
+		// and the write are the same path and the same argument, so both are marked.
 		original, err := os.ReadFile(target) //nolint:gosec
 		if err == nil {
 			var mutated []byte
 			if mutated, err = next.mutant.AppendTo(scratch[:0], original); err == nil {
 				scratch = mutated
 				restore[target] = original
-				err = os.WriteFile(target, mutated, 0o600)
+				err = os.WriteFile(target, mutated, 0o600) //nolint:gosec
 			}
 		}
 		if err != nil {

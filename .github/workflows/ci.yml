@@ -53,8 +53,13 @@ jobs:
         # rather than in a wall of compiler errors, and only a cross-compile keeps that true.
         run: GOOS=windows go build ./...
       - name: lint
+        # This pin and the "stable" toolchain above have to move together. golangci-lint typechecks
+        # with a vendored go/types, so a linter older than the Go that built the code cannot read
+        # its export data and every import in the module comes back as a typecheck failure — which
+        # is what a floating "stable" does to a pin left alone: it breaks on the day Go releases,
+        # on a commit that changed nothing. Bump this when the toolchain moves.
         run: |
-          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.5.0
+          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2
           golangci-lint run ./...
       - name: nothing outside the standard library
         # The README states this as an invariant, and an invariant nothing checks is a hope. A
