@@ -10,7 +10,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/gurre/mutest/mutant"
+	"github.com/gurre/mutest/internal/mutant"
 )
 
 // recordingTester stands in for the go toolchain. It records what it was asked to run and

@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gurre/mutest/mutant"
-	"github.com/gurre/mutest/mutation"
-	"github.com/gurre/mutest/scorecard"
-	"github.com/gurre/mutest/trial"
+	"github.com/gurre/mutest/internal/mutant"
+	"github.com/gurre/mutest/internal/mutation"
+	"github.com/gurre/mutest/internal/scorecard"
+	"github.com/gurre/mutest/internal/trial"
 )
 
 // captureStderr redirects everything a sweep says about itself, and puts it back afterwards.

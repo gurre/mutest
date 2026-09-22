@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gurre/mutest/mutant"
+	"github.com/gurre/mutest/internal/mutant"
 )
 
 // moduleRoot is the module this command is part of, found by walking up from the directory the
@@ -16,10 +16,10 @@ import (
 // thing if the command moves.
 //
 // The working directory rather than runtime.Caller: under -trimpath the compiler reports this
-// file as github.com/gurre/mutest/mutation/mutation_test.go, a path no filesystem has, and the
-// benchmark then fails to list a single package. That is not a corner somebody has to go looking
-// for — mutest puts -trimpath into GOFLAGS for every go command it starts, so the one thing this
-// benchmark measures was unmeasurable from inside a sweep of this very module.
+// file as github.com/gurre/mutest/internal/mutation/mutation_test.go, a path no filesystem has,
+// and the benchmark then fails to list a single package. That is not a corner somebody has to go
+// looking for — mutest puts -trimpath into GOFLAGS for every go command it starts, so the one
+// thing this benchmark measures was unmeasurable from inside a sweep of this very module.
 func moduleRoot(tb testing.TB) string {
 	tb.Helper()
 
@@ -884,7 +884,9 @@ func TestASiteInADeclarationNamesNoFunction(t *testing.T) {
 }
 
 func TestEveryMutantTheFixtureProducesIsStillGo(t *testing.T) {
-	root := "../"
+	// The module root rather than a count of "..": the fixture sits beside go.mod, and how many
+	// directories separate this test from it is a fact about where this package happens to live.
+	root := moduleRoot(t)
 
 	mutants, err := Generate(root, "testdata")
 	if err != nil {

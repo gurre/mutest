@@ -19,7 +19,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/gurre/mutest/mutant"
+	"github.com/gurre/mutest/internal/mutant"
 )
 
 // Suite is what a sweep learned about one package's tests before it mutated anything.

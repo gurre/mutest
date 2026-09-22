@@ -17,10 +17,10 @@ in production and nothing in your repository would say so.
 go install github.com/gurre/mutest@latest
 ```
 
-That puts a `mutest` binary in `$(go env GOBIN)`, or `$(go env GOPATH)/bin` if `GOBIN` is unset.
-Put that directory on your `PATH` and run
-mutest from the root of the module you want to measure — it is a command you install once, not a
-dependency of the module under test, and it never appears in its `go.mod`.
+That puts a `mutest` binary in `$(go env GOBIN)`, or `$(go env GOPATH)/bin` if `GOBIN` is unset. Put
+that directory on your `PATH` and run mutest from the root of the module you want to measure — it is
+a command you install once, not a dependency of the module under test, and it never appears in its
+`go.mod`.
 
 ```
 cd /path/to/your/module
@@ -42,30 +42,31 @@ module it measures.
 This is mutest run against one of its own packages:
 
 ```
-killed 139   survived 89   timed out 0   invalid 23
-untested 0   unreached 16   unmeasured 0   errored 0
+killed 165   survived 98   timed out 0   invalid 31
+untested 0   unreached 21   unmeasured 0   errored 0
 
-reach           93.4%  (228 of 244 sites any test runs)
-mutation score  61.0%  (139 of 228 sites they run, they notice)
+reach           92.6%  (263 of 284 sites any test runs)
+mutation score  62.7%  (165 of 263 sites they run, they notice)
 
-this suite would notice 57.0% of the defects mutest can describe
+this suite would notice 58.1% of the defects mutest can describe
 
 by operator (worst first):
      0.0%     0/1     arithmetic-assign
      0.0%     0/1     error-swallow
-     9.1%     1/11    conditional-boundary
-    21.4%     3/14    argument-swap
-    53.8%    14/26    remove-statement
+    18.8%     3/16    argument-swap
+    30.8%     4/13    conditional-boundary
+    55.6%     5/9     arithmetic
    ...
    100.0%     4/4     remove-negation
 
-code no test runs (5 functions) — each line is a test nobody has written:
-     7 sites  scorecard/scorecard.go:395  orderedGaps
-     3 sites  scorecard/scorecard.go:482  Scorecard.WriteTo
+code a test enters but does not finish (6 functions) — each line is a case nobody added to a test
+that already exists:
+     7 sites  internal/scorecard/scorecard.go:465  orderedGaps
+     7 sites  internal/scorecard/scorecard.go:587  Scorecard.WriteTo
 
-survivors (89) — each line is a defect a test ran past without objecting:
-  scorecard/scorecard.go:61:9 [conditional-boundary] "==" -> ">="
-      if t.Scored == 0 {
+survivors (98) — each line is a defect a test ran past without objecting:
+  internal/scorecard/scorecard.go:85:13 [arithmetic] "*" -> "/"
+      return 100 * float64(r.Reached) / float64(total)
 ```
 
 ## What it reports
@@ -184,9 +185,12 @@ One invariant, checked in CI: nothing outside the standard library gets imported
 carried a dependency would measure modules that carry it too, and a sweep is the wrong moment to
 find out the two versions disagree.
 
+The packages under `internal/` are this command's own machinery, not an API. They are arranged for
+the harness's convenience and they change without notice.
+
 Before sending a change, run `go test -race -count=1 ./...`, `golangci-lint run`, and a sweep over
-the package you touched. This repository is the one place to run it as `go run . -packages <the
-package you touched>` rather than as an installed binary: what you want measured is the working
+the package you touched. This repository is the one place to run a sweep as `go run . -packages
+<the package you touched>` rather than as an installed binary: what you want measured is the working
 copy, and an installed `mutest` would be measuring it with whatever was on your `PATH` last week.
 
 ## License

@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gurre/mutest/mutant"
+	"github.com/gurre/mutest/internal/mutant"
 )
 
 func result(pkg, operator string, outcome mutant.Outcome) mutant.Result {

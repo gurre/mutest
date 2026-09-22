@@ -110,7 +110,7 @@ jobs:
       #
       # The disk and cache bounds are not tuning. The defaults assume a developer's laptop and a
       # runner has far less free space than that, so without them the sweep refuses to start.
-      - run: go run . -results mutants.json -packages mutant -jobs 2 -disk-floor 1GiB -cache-budget 2GiB
+      - run: go run . -results mutants.json -packages internal/mutant -jobs 2 -disk-floor 1GiB -cache-budget 2GiB
       - name: a mutant that does not compile is invalid, not caught
         # The one verdict the two toolchains disagree about, and the reason this job runs on the
         # floor at all. A build failure carries a structured field from 1.24 onward and only the go

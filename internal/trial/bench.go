@@ -23,8 +23,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gurre/mutest/dependency"
-	"github.com/gurre/mutest/mutant"
+	"github.com/gurre/mutest/internal/dependency"
+	"github.com/gurre/mutest/internal/mutant"
 )
 
 // Bench is a set of isolated module copies and the tester that runs in them.

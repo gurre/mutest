@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gurre/mutest/coverage"
+	"github.com/gurre/mutest/internal/coverage"
 )
 
 // Baseline is what one package's tests said before anything was mutated.

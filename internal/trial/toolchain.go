@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gurre/mutest/coverage"
+	"github.com/gurre/mutest/internal/coverage"
 )
 
 // Report is what one run of a package's tests said.

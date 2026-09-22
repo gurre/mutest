@@ -54,12 +54,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/gurre/mutest/buildcache"
-	"github.com/gurre/mutest/mutant"
-	"github.com/gurre/mutest/mutation"
-	"github.com/gurre/mutest/scorecard"
-	"github.com/gurre/mutest/scratch"
-	"github.com/gurre/mutest/trial"
+	"github.com/gurre/mutest/internal/buildcache"
+	"github.com/gurre/mutest/internal/mutant"
+	"github.com/gurre/mutest/internal/mutation"
+	"github.com/gurre/mutest/internal/scorecard"
+	"github.com/gurre/mutest/internal/scratch"
+	"github.com/gurre/mutest/internal/trial"
 )
 
 func main() {

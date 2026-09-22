@@ -23,7 +23,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/gurre/mutest/mutant"
+	"github.com/gurre/mutest/internal/mutant"
 )
 
 // swap is one replacement of a binary operator, and the operator class it belongs to.

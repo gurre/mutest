@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gurre/mutest/mutant"
+	"github.com/gurre/mutest/internal/mutant"
 )
 
 // statedGrouper answers from a stated set of one-directional links, so a test can describe the

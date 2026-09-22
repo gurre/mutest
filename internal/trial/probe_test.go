@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gurre/mutest/coverage"
-	"github.com/gurre/mutest/mutant"
+	"github.com/gurre/mutest/internal/coverage"
+	"github.com/gurre/mutest/internal/mutant"
 )
 
 // recordingProber stands in for the unmutated run. It answers with a canned baseline and records

@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gurre/mutest/mutant"
+	"github.com/gurre/mutest/internal/mutant"
 )
 
 // testModule is the module path the streams below belong to, so a package's import path can be

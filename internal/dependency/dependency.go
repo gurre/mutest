@@ -35,7 +35,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/gurre/mutest/coverage"
+	"github.com/gurre/mutest/internal/coverage"
 )
 
 // Graph is what each package of a module links, including through its tests.
