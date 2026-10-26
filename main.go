@@ -48,9 +48,11 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -72,10 +74,13 @@ func main() {
 type settings struct {
 	module   string
 	packages string
+	files    string
 	scratch  string
 	jobs     int
 	batch    int
 	budget   time.Duration
+	limit    time.Duration
+	cool     bool
 	results  string
 	against  string
 	list     bool
@@ -206,12 +211,15 @@ func commandLine(options *settings) *flag.FlagSet {
 
 	set.StringVar(&options.module, "module", ".", "module root to measure; it is read and never written")
 	set.StringVar(&options.packages, "packages", "", "comma separated package directories relative to the module root; empty means every package")
+	set.StringVar(&options.files, "files", "", "comma separated Go files relative to the module root; only defects in them are tried, and with no -packages only their packages are enumerated")
 	set.StringVar(&options.scratch, "scratch", "", "where the module copies and the go command's build directories go; empty means a temporary one")
 	set.IntVar(&options.jobs, "jobs", defaultJobs(), "how many trials run at once; each worker's go command is held to a share of the machine, not all of it")
 	set.DurationVar(&options.budget, "budget", 2*time.Minute, "how long one package's tests may run before the mutant counts as caught by a hang")
+	set.DurationVar(&options.limit, "limit", 0, "stop the whole sweep after this long and report what finished; unfinished defects are untried, and the exit status is non-zero; 0 means no limit")
 	set.StringVar(&options.results, "results", "", "write the full result set here as JSON, and each verdict to the same path plus \"l\" as it lands")
 	set.IntVar(&options.batch, "batch", defaultBatch, "how many mutants share one invocation of the go command; 1 gives each its own")
 	set.StringVar(&options.against, "against", "", "run this package's tests for every mutant, instead of the mutant's own package")
+	set.BoolVar(&options.cool, "cool", false, "run gently enough to keep a laptop's fans off: a quarter of the cores unless the worker count is given, at the lowest scheduling priority; it takes longer, so pair it with -limit")
 	set.BoolVar(&options.why, "why", false, "print the reasoning behind the defaults, which -h leaves out to stay short")
 	set.BoolVar(&options.list, "list", false, "print the defects that would be tried and exit without running any tests")
 	set.BoolVar(&options.version, "version", false, "print which build this is and exit")
@@ -490,6 +498,12 @@ func run() error {
 		return nil
 	}
 
+	if options.cool {
+		if err := keepCool(commands, &options); err != nil {
+			return err
+		}
+	}
+
 	module, err := filepath.Abs(options.module)
 	if err != nil {
 		return err
@@ -507,7 +521,17 @@ func run() error {
 		return err
 	}
 
-	targets, err := targetPackages(module, options.packages)
+	files, err := targetFiles(options.files)
+	if err != nil {
+		return err
+	}
+
+	requested := options.packages
+	if strings.TrimSpace(requested) == "" {
+		requested = directoriesOf(files)
+	}
+
+	targets, err := targetPackages(module, requested)
 	if err != nil {
 		return err
 	}
@@ -515,6 +539,12 @@ func run() error {
 	mutants, err := enumerate(module, targets)
 	if err != nil {
 		return err
+	}
+	if len(files) > 0 {
+		mutants = inFiles(mutants, files)
+		if len(mutants) == 0 {
+			return fmt.Errorf("no defects to try in %s: the files are not Go files in the targeted packages, or have no site any operator applies to", options.files)
+		}
 	}
 	fmt.Fprintf(errOut, "%d mutants across %d packages\n", len(mutants), len(targets))
 
@@ -554,6 +584,20 @@ func run() error {
 	// ways the abandoned copies above came to exist.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	defer stop()
+
+	// A cancel, never context.WithTimeout: the trial package reads an expired deadline as a hung test
+	// and counts it as caught, so a deadline here would score every trial in flight as a catch.
+	// Cancellation is what an interrupt already is, and is reported as untried.
+	ctx, cancelSweep := context.WithCancel(ctx)
+	defer cancelSweep()
+	var limitReached atomic.Bool
+	if options.limit > 0 {
+		timer := time.AfterFunc(options.limit, func() {
+			limitReached.Store(true)
+			cancelSweep()
+		})
+		defer timer.Stop()
+	}
 
 	cache, err := buildcache.Open(buildcache.Options{
 		Directory: options.cache,
@@ -622,6 +666,10 @@ func run() error {
 	// half hour it took. The gate is not consulted — a threshold met by a sweep that did not try
 	// every defect is not a pass, and reporting one would be the worst kind of green.
 	if err := bench.Fault(); err != nil {
+		if limitReached.Load() {
+			return fmt.Errorf("the -limit of %s was reached and not every defect was tried: %w", options.limit, err)
+		}
+
 		return fmt.Errorf("the sweep stopped early and did not try every defect: %w", err)
 	}
 
@@ -1047,4 +1095,82 @@ func defaultJobs() int {
 	}
 
 	return jobs
+}
+
+// targetFiles resolves the -files flag into cleaned, module-relative slash paths.
+//
+// The same rules as a package name apply for the same reason: the path is joined onto the module
+// root and onto every module copy, so one that climbs out with ".." would be read outside the
+// module the caller pointed at.
+func targetFiles(requested string) (map[string]bool, error) {
+	files := map[string]bool{}
+
+	for _, name := range strings.Split(requested, ",") {
+		trimmed := strings.TrimSpace(name)
+		if trimmed == "" {
+			continue
+		}
+
+		cleaned := path.Clean(filepath.ToSlash(trimmed))
+		if !filepath.IsLocal(cleaned) {
+			return nil, fmt.Errorf("%q is not inside the module: name a file relative to the module root, as in -files internal/billing/invoice.go", trimmed)
+		}
+		if !strings.HasSuffix(cleaned, ".go") {
+			return nil, fmt.Errorf("%q is not a Go file: -files names source files, use -packages for a directory", trimmed)
+		}
+
+		files[cleaned] = true
+	}
+
+	return files, nil
+}
+
+// directoriesOf joins the directories holding the files into a -packages value, so a sweep
+// limited to a file does not enumerate every other package in the module first.
+func directoriesOf(files map[string]bool) string {
+	directories := make([]string, 0, len(files))
+	for file := range files {
+		directories = append(directories, path.Dir(file))
+	}
+	slices.Sort(directories)
+
+	return strings.Join(slices.Compact(directories), ",")
+}
+
+// inFiles keeps the mutants whose site is in one of the files.
+func inFiles(mutants []mutant.Mutant, files map[string]bool) []mutant.Mutant {
+	var kept []mutant.Mutant
+	for _, candidate := range mutants {
+		if files[filepath.ToSlash(candidate.Site.File)] {
+			kept = append(kept, candidate)
+		}
+	}
+
+	return kept
+}
+
+// keepCool makes the sweep gentle on the machine it runs on.
+//
+// Fans follow sustained heat, and heat follows how many cores are busy, so the lever is width: a
+// quarter of the cores, or whatever -jobs asked for. The lowest priority is set on this process
+// and inherited by every go command it starts, so a sweep started at night yields to anything the
+// person at the machine does. The cost is wall-clock time, which -limit bounds.
+func keepCool(commands *flag.FlagSet, options *settings) error {
+	explicit := false
+	commands.Visit(func(f *flag.Flag) {
+		if f.Name == "jobs" {
+			explicit = true
+		}
+	})
+	if !explicit {
+		options.jobs = max(1, runtime.NumCPU()/4)
+	}
+
+	// 19 is the lowest priority; a failure means the guarantee of a quiet machine does not hold, so
+	// it is refused rather than ignored.
+	if err := syscall.Setpriority(syscall.PRIO_PROCESS, 0, 19); err != nil {
+		return fmt.Errorf("-cool could not lower the scheduling priority: %w", err)
+	}
+
+	return nil
 }

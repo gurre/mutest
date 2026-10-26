@@ -27,6 +27,9 @@ cd /path/to/your/module
 
 mutest                                  # every package in the module
 mutest -packages internal/billing       # one package
+mutest -files internal/billing/invoice.go  # one file
+mutest -limit 20m                       # stop after twenty minutes and report what finished
+mutest -cool -limit 20m                 # a quarter of the cores at lowest priority, for fans that stay off
 mutest -results mutants.json            # keep the full result set
 mutest -h                               # flags, outcomes and operators
 mutest -why                             # the reasoning behind the defaults

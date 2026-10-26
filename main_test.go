@@ -922,3 +922,29 @@ func TestBuildExclusionsNameFiveThenCountTheRest(t *testing.T) {
 		t.Errorf("the excess beyond the first five must be counted as \"and 1 more\", got %q", output)
 	}
 }
+
+func TestFilesFlagKeepsOnlyNamedFiles(t *testing.T) {
+	files, err := targetFiles("./a/x.go, a/y.go,")
+	if err != nil {
+		t.Fatalf("naming files must succeed, got error: %v", err)
+	}
+	if got := directoriesOf(files); got != "a" {
+		t.Errorf("files in one directory must name that package once, got %q", got)
+	}
+
+	mutants := []mutant.Mutant{
+		{Site: mutant.Site{File: "a/x.go"}},
+		{Site: mutant.Site{File: "a/z.go"}},
+		{Site: mutant.Site{File: "b/x.go"}},
+	}
+	kept := inFiles(mutants, files)
+	if len(kept) != 1 || kept[0].Site.File != "a/x.go" {
+		t.Errorf("only defects in the named files must remain, got %v", kept)
+	}
+
+	for _, bad := range []string{"../x.go", "/etc/x.go", "a"} {
+		if _, err := targetFiles(bad); err == nil {
+			t.Errorf("%q must be refused", bad)
+		}
+	}
+}
