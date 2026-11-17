@@ -20,13 +20,14 @@ func (s batchScenario) bench() *Bench {
 	return &Bench{batch: s.width, grouping: s.grouping}
 }
 
-// drawBatchScenario draws a width in [0,6], up to four package names, up to twenty assignments
-// each with a distinct index and offset, and either no grouper or a random set of one-directional
-// links over ordered package pairs.
-func drawBatchScenario(t *rapid.T) batchScenario {
-	names := []string{"alpha", "beta", "gamma", "delta"}
-	width := rapid.IntRange(0, 6).Draw(t, "width")
-	packages := rapid.SliceOfN(rapid.SampledFrom(names), 0, 20).Draw(t, "packages")
+// batchPackageNames is wide enough that a batch can reach the widest width drawn.
+var batchPackageNames = []string{"alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta"}
+
+// drawPending draws a width in [0,8] and up to thirty assignments over eight package names, each
+// with a distinct index and offset.
+func drawPending(t *rapid.T) batchScenario {
+	width := rapid.IntRange(0, 8).Draw(t, "width")
+	packages := rapid.SliceOfN(rapid.SampledFrom(batchPackageNames), 0, 30).Draw(t, "packages")
 
 	pending := make([]assignment, 0, len(packages))
 	for index, name := range packages {
@@ -35,13 +36,27 @@ func drawBatchScenario(t *rapid.T) batchScenario {
 		pending = append(pending, assignment{index: index, mutant: candidate})
 	}
 
-	scenario := batchScenario{width: width, pending: pending}
-	if rapid.Bool().Draw(t, "grouped") {
+	return batchScenario{width: width, pending: pending}
+}
+
+// drawBatchScenario draws pending work as drawPending does and then one of three linking modes: no
+// grouper at all, an empty grouper that links nothing, or a random set of one-directional links
+// over ordered package pairs, each present with a probability drawn once per case so that sparse,
+// medium and dense link graphs are all reached.
+func drawBatchScenario(t *rapid.T) batchScenario {
+	scenario := drawPending(t)
+
+	switch rapid.SampledFrom([]string{"none", "nothing linked", "random"}).Draw(t, "mode") {
+	case "nothing linked":
+		scenario.linked = statedGrouper{links: map[string]map[string]bool{}}
+		scenario.grouping = scenario.linked
+	case "random":
+		percent := rapid.IntRange(0, 100).Draw(t, "link percent")
 		links := map[string]map[string]bool{}
-		for _, from := range names {
+		for _, from := range batchPackageNames {
 			links[from] = map[string]bool{}
-			for _, to := range names {
-				links[from][to] = rapid.Bool().Draw(t, fmt.Sprintf("link %s->%s", from, to))
+			for _, to := range batchPackageNames {
+				links[from][to] = rapid.IntRange(1, 100).Draw(t, fmt.Sprintf("link %s->%s", from, to)) <= percent
 			}
 		}
 		scenario.linked = statedGrouper{links: links}
@@ -178,4 +193,63 @@ func TestBatchesNeverHoldTwoMutantsOfOnePackage(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestBatchesOfIndependentPackagesAreFullUntilTheWorkRunsOut covers progress when nothing is
+// linked. It exists because every other property here is satisfied by one singleton batch per
+// assignment, which would make the width a dead setting. With every pair independent, a batch is
+// short only when fewer packages than the width still have work, and that never reverses, so short
+// batches form a suffix no longer than the largest per-package queue. When the width reaches the
+// number of distinct packages each batch takes one from every package left, so the count is exactly
+// the largest queue.
+func TestBatchesOfIndependentPackagesAreFullUntilTheWorkRunsOut(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		scenario := drawPending(t)
+		scenario.linked = statedGrouper{links: map[string]map[string]bool{}}
+		scenario.grouping = scenario.linked
+		limit := max(scenario.width, 1)
+
+		perPackage := map[string]int{}
+		longest := 0
+		for _, next := range scenario.pending {
+			name := next.mutant.Site.Package
+			perPackage[name]++
+			longest = max(longest, perPackage[name])
+		}
+
+		batches := scenario.bench().batches(scenario.pending)
+
+		if limit >= len(perPackage) {
+			if len(batches) != longest {
+				t.Fatalf("width %d covers all %d packages: got %d batches, want %d (the longest queue)", limit, len(perPackage), len(batches), longest)
+			}
+
+			return
+		}
+		if floor := (len(scenario.pending) + limit - 1) / limit; len(batches) < floor {
+			t.Fatalf("got %d batches for %d assignments at width %d, want at least %d", len(batches), len(scenario.pending), limit, floor)
+		}
+		short := 0
+		for index, batch := range batches {
+			switch {
+			case len(batch) < limit:
+				short++
+			case short > 0:
+				t.Fatalf("batch %d is full after a short batch; sizes %v", index, sizes(batches))
+			}
+		}
+		if short > longest {
+			t.Fatalf("%d short batches, want at most %d; sizes %v", short, longest, sizes(batches))
+		}
+	})
+}
+
+// sizes lists how many assignments each batch holds.
+func sizes(batches [][]assignment) []int {
+	found := make([]int, 0, len(batches))
+	for _, batch := range batches {
+		found = append(found, len(batch))
+	}
+
+	return found
 }

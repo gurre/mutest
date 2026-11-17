@@ -8,7 +8,8 @@ import (
 	"pgregory.net/rapid"
 )
 
-// inRangeEdit is a source, a span that fits inside it and a replacement to put there.
+// inRangeEdit is a source, a span that fits inside it, and a replacement to put there. Half the
+// draws end the span exactly at the end of the source.
 type inRangeEdit struct {
 	source      []byte
 	replacement []byte
@@ -24,6 +25,10 @@ func drawInRangeEdit(t *rapid.T) inRangeEdit {
 	source := rapid.SliceOfN(rapid.Byte(), 0, 64).Draw(t, "source")
 	offset := rapid.IntRange(0, len(source)).Draw(t, "offset")
 	length := rapid.IntRange(0, len(source)-offset).Draw(t, "length")
+	if rapid.Bool().Draw(t, "reachesTheEnd") {
+		// The span ending exactly at len(source) is the boundary a refusal must not overshoot.
+		length = len(source) - offset
+	}
 	replacement := rapid.SliceOfN(rapid.Byte(), 0, 16).Draw(t, "replacement")
 
 	return inRangeEdit{source: source, replacement: replacement, offset: offset, length: length}
@@ -91,10 +96,11 @@ func TestAppendingAMutantExtendsTheBufferAndTouchesNothingElse(t *testing.T) {
 }
 
 // TestASpanOutsideTheSourceIsRefusedWithoutPanicking covers a negative offset and an end past
-// the source, each with a non-negative length. It exists because applying a mutant to the wrong
-// bytes would be reported against a line it never touched. Negative lengths are left out on
-// purpose: Apply does not guard them, and the generator only builds lengths from AST spans, which
-// never run backwards.
+// the source, each with a non-negative length (an offset past the end gets a zero length at least,
+// so its end is still past the source). It exists because applying a mutant to the wrong
+// bytes would be reported against a line it never touched. Negative lengths are never drawn: Apply
+// does not guard them, and the generator only builds lengths from AST spans, which never run
+// backwards.
 func TestASpanOutsideTheSourceIsRefusedWithoutPanicking(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		source := rapid.SliceOfN(rapid.Byte(), 0, 64).Draw(t, "source")
@@ -104,7 +110,7 @@ func TestASpanOutsideTheSourceIsRefusedWithoutPanicking(t *testing.T) {
 			length = rapid.IntRange(0, 128).Draw(t, "length")
 		} else {
 			offset = rapid.IntRange(0, len(source)+16).Draw(t, "offset")
-			length = rapid.IntRange(len(source)-offset+1, len(source)+32).Draw(t, "length")
+			length = rapid.IntRange(max(0, len(source)-offset+1), len(source)+32).Draw(t, "length")
 		}
 		candidate := Mutant{Site: Site{Offset: offset, Length: length}, Replacement: "x"}
 
