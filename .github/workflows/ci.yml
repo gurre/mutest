@@ -68,13 +68,18 @@ jobs:
         # module (go.mod lists them), because nothing a test imports is linked into the binary. So
         # the check is on what the binary links: "go list -deps" without -test walks only non-test
         # imports, and every one of them must be standard library or this module's own package.
+        # Each platform is listed, because some files build for only one. The listing is its own
+        # assignment so a failing "go list" fails the step instead of looking like an empty answer.
         run: |
-          foreign=$(go list -deps -f '{{if not .Standard}}{{.ImportPath}}{{end}}' ./... | grep -v '^github.com/gurre/mutest\(/\|$\)' || true)
-          if [ -n "$foreign" ]; then
-            echo "mutest must link nothing outside the standard library, but imports:"
-            echo "$foreign"
-            exit 1
-          fi
+          for goos in linux darwin windows; do
+            deps=$(GOOS=$goos go list -deps -f '{{if not .Standard}}{{.ImportPath}}{{end}}' ./...)
+            foreign=$(printf '%s\n' "$deps" | grep -v -e '^$' -e '^github.com/gurre/mutest\(/\|$\)' || true)
+            if [ -n "$foreign" ]; then
+              echo "mutest must link nothing outside the standard library, but on $goos imports:"
+              echo "$foreign"
+              exit 1
+            fi
+          done
 
   release-config:
     runs-on: ubuntu-latest
