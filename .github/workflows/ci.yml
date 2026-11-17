@@ -62,24 +62,8 @@ jobs:
           go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2
           golangci-lint run ./...
       - name: nothing outside the standard library
-        # The README states this as an invariant, and an invariant nothing checks is a hope. A
-        # harness that pulled in a dependency would measure modules that also depend on it, and a
-        # sweep is the wrong moment to discover that the two versions disagree. Tests may use a
-        # module (go.mod lists them), because nothing a test imports is linked into the binary. So
-        # the check is on what the binary links: "go list -deps" without -test walks only non-test
-        # imports, and every one of them must be standard library or this module's own package.
-        # Each platform is listed, because some files build for only one. The listing is its own
-        # assignment so a failing "go list" fails the step instead of looking like an empty answer.
-        run: |
-          for goos in linux darwin windows; do
-            deps=$(GOOS=$goos go list -deps -f '{{if not .Standard}}{{.ImportPath}}{{end}}' ./...)
-            foreign=$(printf '%s\n' "$deps" | grep -v -e '^$' -e '^github.com/gurre/mutest\(/\|$\)' || true)
-            if [ -n "$foreign" ]; then
-              echo "mutest must link nothing outside the standard library, but on $goos imports:"
-              echo "$foreign"
-              exit 1
-            fi
-          done
+        # The script says why; the release hook in .goreleaser.yaml runs the same file.
+        run: sh .github/stdlib-only.sh
 
   release-config:
     runs-on: ubuntu-latest

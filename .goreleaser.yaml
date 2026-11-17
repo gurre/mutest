@@ -6,8 +6,9 @@ before:
   hooks:
     # Checked rather than tidied. "go mod tidy" here would quietly write a dependency in and build
     # against it, which is the one invariant this project has that a released binary could break
-    # with nobody reading a diff. This refuses instead, and names what appeared.
-    - sh -c 'test "$(go list -m all)" = "github.com/gurre/mutest" || { go list -m all; echo "mutest must depend on nothing outside the standard library"; exit 1; }'
+    # with nobody reading a diff. This refuses instead, and names what appeared. It is a script
+    # rather than inline because goreleaser would read the go list template as its own.
+    - sh .github/stdlib-only.sh
 
 builds:
   - id: mutest
