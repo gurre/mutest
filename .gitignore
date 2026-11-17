@@ -5,3 +5,6 @@
 /dist
 *.out
 .DS_Store
+
+# Failing inputs rapid saves for replay; reproduce them locally, never commit them.
+**/testdata/rapid/

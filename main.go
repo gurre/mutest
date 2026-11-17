@@ -42,6 +42,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/signal"
 	"path"
@@ -119,6 +120,9 @@ func (b *byteSize) Set(text string) error {
 	}
 	if amount < 0 {
 		return fmt.Errorf("%q is negative, and a size is not", text)
+	}
+	if amount > math.MaxInt64/multiplier {
+		return fmt.Errorf("%q is too large to hold: write it as at most %dGiB", text, math.MaxInt64>>30)
 	}
 
 	*b = byteSize(amount * multiplier)

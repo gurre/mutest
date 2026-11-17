@@ -64,13 +64,15 @@ jobs:
       - name: nothing outside the standard library
         # The README states this as an invariant, and an invariant nothing checks is a hope. A
         # harness that pulled in a dependency would measure modules that also depend on it, and a
-        # sweep is the wrong moment to discover that the two versions disagree. "go list -m all"
-        # names this module and every module it requires, so the whole check is that there is one.
+        # sweep is the wrong moment to discover that the two versions disagree. Tests may use a
+        # module (go.mod lists them), because nothing a test imports is linked into the binary. So
+        # the check is on what the binary links: "go list -deps" without -test walks only non-test
+        # imports, and every one of them must be standard library or this module's own package.
         run: |
-          modules=$(go list -m all)
-          if [ "$modules" != "github.com/gurre/mutest" ]; then
-            echo "mutest must depend on nothing outside the standard library, but requires:"
-            echo "$modules"
+          foreign=$(go list -deps -f '{{if not .Standard}}{{.ImportPath}}{{end}}' ./... | grep -v '^github.com/gurre/mutest\(/\|$\)' || true)
+          if [ -n "$foreign" ]; then
+            echo "mutest must link nothing outside the standard library, but imports:"
+            echo "$foreign"
             exit 1
           fi
 

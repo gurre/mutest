@@ -175,7 +175,7 @@ this measurement can be gamed.
 
 ## Requirements
 
-Go 1.23 or later, on Linux or macOS. No dependencies outside the standard library.
+Go 1.23 or later, on Linux or macOS. The binary links nothing outside the standard library.
 
 The module under test must build and its tests must run — mutest compiles and executes them, once
 unchanged and then once per defect. Point it only at code you would run yourself.
@@ -184,9 +184,10 @@ unchanged and then once per defect. Point it only at code you would run yourself
 
 Issues and pull requests are welcome. This is a solo project, so replies may be slow.
 
-One invariant, checked in CI: nothing outside the standard library gets imported. A harness that
-carried a dependency would measure modules that carry it too, and a sweep is the wrong moment to
-find out the two versions disagree.
+One invariant, checked in CI: the binary imports nothing outside the standard library. A harness
+that carried a dependency would measure modules that carry it too, and a sweep is the wrong moment
+to find out the two versions disagree. Tests are the exception: they may use a test-only module
+such as `pgregory.net/rapid`, because nothing a test imports is linked into the binary.
 
 The packages under `internal/` are this command's own machinery, not an API. They are arranged for
 the harness's convenience and they change without notice.
