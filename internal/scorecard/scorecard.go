@@ -344,8 +344,18 @@ func Tabulate(results []mutant.Result, suites []Suite) Scorecard {
 	card.UnreachedFunctions = orderedGaps(gaps)
 	card.ErroredReasons = orderedReasons(errored)
 
+	// Source order, then operator and replacement: several mutants share a site (guard-always
+	// beside guard-never), and ordering them by site alone would leave them in arrival order.
 	sort.Slice(card.Survivors, func(i, j int) bool {
-		return earlier(card.Survivors[i].Mutant.Site, card.Survivors[j].Mutant.Site)
+		left, right := card.Survivors[i].Mutant, card.Survivors[j].Mutant
+		if earlier(left.Site, right.Site) || earlier(right.Site, left.Site) {
+			return earlier(left.Site, right.Site)
+		}
+		if left.Operator != right.Operator {
+			return left.Operator < right.Operator
+		}
+
+		return left.Replacement < right.Replacement
 	})
 
 	// After the sort, so the guards come out in the survivors' own order rather than the order
@@ -465,8 +475,13 @@ func orderedGaps(gaps map[string]*FunctionGap) []FunctionGap {
 		if ordered[i].File != ordered[j].File {
 			return ordered[i].File < ordered[j].File
 		}
+		if ordered[i].Line != ordered[j].Line {
+			return ordered[i].Line < ordered[j].Line
+		}
 
-		return ordered[i].Line < ordered[j].Line
+		// Two functions can start on one line, a closure beside its parent. Their gaps come out
+		// of a map, so without this the report would order them differently run to run.
+		return ordered[i].Func < ordered[j].Func
 	})
 
 	return ordered
