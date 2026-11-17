@@ -1170,9 +1170,9 @@ func keepCool(commands *flag.FlagSet, options *settings) error {
 		options.jobs = max(1, runtime.NumCPU()/4)
 	}
 
-	// 19 is the lowest priority; a failure means the guarantee of a quiet machine does not hold, so
-	// it is refused rather than ignored.
-	if err := syscall.Setpriority(syscall.PRIO_PROCESS, 0, 19); err != nil {
+	// A failure means the guarantee of a quiet machine does not hold, so it is refused rather than
+	// ignored.
+	if err := lowestPriority(); err != nil {
 		return fmt.Errorf("-cool could not lower the scheduling priority: %w", err)
 	}
 
