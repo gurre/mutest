@@ -129,22 +129,18 @@ var goFile = rapid.Custom(func(t *rapid.T) string {
 
 // TestEveryGeneratedMutantAddressesItsOriginalAndStaysValidGo covers the generator's contract on
 // arbitrary valid Go: each mutant must name the exact bytes it replaces, apply cleanly, change the
-// file, leave it parseable and report the line and column of that offset. A mutant that breaks any
-// of these is reported against code it never touched, or wastes a trial on a compile error that
-// every suite would trivially "kill".
+// file, leave it syntactically valid Go and report the line and column of that offset. Only syntax
+// is checked: the mutant is parsed, not type-checked, so type errors are not ruled out here. A mutant
+// that breaks any of these is reported against code it never touched.
 func TestEveryGeneratedMutantAddressesItsOriginalAndStaysValidGo(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		text := goFile.Draw(t, "file")
 		source := []byte(text)
 
-		if _, err := parser.ParseFile(token.NewFileSet(), "p.go", source, parser.SkipObjectResolution); err != nil {
-			t.Fatalf("the source generator must emit valid Go, got error: %v\n%s", err, text)
-		}
-
 		fileSet := token.NewFileSet()
 		parsed, err := parser.ParseFile(fileSet, "p.go", source, parser.SkipObjectResolution)
 		if err != nil {
-			t.Fatalf("parsing the generated file must succeed, got error: %v", err)
+			t.Fatalf("the source generator must emit valid Go, got error: %v\n%s", err, text)
 		}
 
 		for _, m := range mutateFile(fileSet, parsed, source, "p", "p/p.go") {
@@ -279,26 +275,45 @@ var structTag = rapid.Custom(func(t *rapid.T) string {
 	return tag[0] + " " + tag[1]
 })
 
-// TestDroppingStorageOmitEmptyIsIdempotent covers the tag rewrite: once an omitempty has been
-// removed from the storage tag there must be none left to remove, and the response tag must be
-// untouched. A rewrite that left one behind would produce a mutant a second pass could produce
-// again, and one that touched the response tag would mutate something no test has an opinion on.
+// TestDroppingStorageOmitEmptyIsIdempotent covers the tag rewrite: only the quoted storage value
+// may change, and in it only by losing every ",omitempty". Everything outside that value, the
+// response tag included, must be byte-identical, and a tag with no storage tag or nothing to drop
+// must be refused. Once rewritten there is none left to remove, so a second pass is refused too.
+// A rewrite that stripped the response tag would mutate something no test has an opinion on, and one
+// that left an omitempty behind would produce a mutant a second pass could produce again.
 func TestDroppingStorageOmitEmptyIsIdempotent(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		tag := structTag.Draw(t, "tag")
 
+		// The reference locates the storage value on its own, apart from the implementation.
+		var prefix, value, suffix string
+		hasStorage := false
+		if start := strings.Index(tag, storageTag); start >= 0 {
+			start += len(storageTag)
+			end := start + strings.IndexByte(tag[start:], '"')
+			prefix, value, suffix = tag[:start], tag[start:end], tag[end:]
+			hasStorage = true
+		}
+		droppable := hasStorage && strings.Contains(value, ",omitempty")
+
 		out, ok := withoutStorageOmitEmpty(tag)
+		if ok != droppable {
+			t.Fatalf("withoutStorageOmitEmpty(%q) reported %v, want %v (storage tag %v, omitempty in its value %v)", tag, ok, droppable, hasStorage, droppable)
+		}
 		if !ok {
 			return
 		}
 		if out == tag {
 			t.Fatalf("a rewrite reported as made must change the tag, %q is unchanged", tag)
 		}
+		if !strings.HasPrefix(out, prefix) || !strings.HasSuffix(out, suffix) {
+			t.Fatalf("the rewrite of %q to %q must leave everything outside the storage value untouched", tag, out)
+		}
+		if got, want := out[len(prefix):len(out)-len(suffix)], strings.ReplaceAll(value, ",omitempty", ""); got != want {
+			t.Fatalf("the storage value of %q became %q, want %q", tag, got, want)
+		}
 		if again, ok := withoutStorageOmitEmpty(out); ok {
 			t.Fatalf("withoutStorageOmitEmpty(%q) = %q, true; nothing should be left to drop", out, again)
-		}
-		if got, want := strings.Count(out, "omitempty"), strings.Count(tag, "omitempty"); got >= want {
-			t.Fatalf("the rewrite of %q must remove an omitempty, counts went %d -> %d", tag, want, got)
 		}
 	})
 }
